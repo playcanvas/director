@@ -1,0 +1,18 @@
+{
+    "name": "playcanvas-director",
+    "displayName": "PlayCanvas Director",
+    "description": "An editor for working on PlayCanvas scenes and apps with your coding agent: point at entities and camera angles instead of describing them, move them with gizmos, and the agent folds your edits and comments back in - nothing leaves the machine",
+    "version": "0.0.0",
+    "author": {
+        "name": "PlayCanvas",
+        "url": "https://playcanvas.com"
+    },
+    "homepage": "https://github.com/playcanvas/director",
+    "repository": "https://github.com/playcanvas/director",
+    "documentationUrl": "https://github.com/playcanvas/director/blob/main/plugins/playcanvas-director/README.md",
+    "supportUrl": "https://github.com/playcanvas/director/issues",
+    "privacyPolicyUrl": "https://playcanvas.com/privacy",
+    "termsOfServiceUrl": "https://playcanvas.com/terms",
+    "license": "MIT",
+    "keywords": ["playcanvas", "editor", "mcp", "3d", "game-engine"]
+}

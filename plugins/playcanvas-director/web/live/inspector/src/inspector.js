@@ -1,0 +1,4494 @@
+import {
+    Asset, Color, Component, Entity, FramePass, GraphNode, LAYERID_UI, Material, Mesh, MeshInstance, RenderPassForward, RenderTarget, Shader, Texture
+} from 'playcanvas';
+
+import { TextureRenderer } from './renderers/texture-renderer.js';
+import { WireRenderer } from './renderers/wire-renderer.js';
+
+import { pushResourceUsage } from './asset-usage.js';
+import { ASSET_SORTS, assetRows, buildAssetModel, collectAssets } from './asset-view.js';
+import { buildCameraModel, cameraRows, collectCameras } from './camera-view.js';
+import { ContextMenu } from './context-menu.js';
+import { copyGroup, copyList, copyListRow, copySubject, stringifyCopy } from './copy-json.js';
+import { INSTANCES_PER_PAGE, LayerStepSelection, buildPassModel, buildStepModel, captureFrameGraph, passRows, profilerName } from './frame-graph-view.js';
+import { bufferKind, bufferOwners, buildBufferModel, KIND_NAMES, memoryRows, videoMemory } from './memory-view.js';
+import { HierarchyView, filterSuggestions } from './hierarchy-view.js';
+import { ListView } from './list-view.js';
+import {
+    buildMaterialModel, materialListRows, materialsUsingShader, materialsUsingTexture, surveyMaterials,
+    usedByMaterialsSection
+} from './material-view.js';
+import { buildMeshModel, meshBytes, meshListRows, meshNote, surveyMeshes } from './mesh-view.js';
+import { formatBytes, formatName, passDisplayName } from './model.js';
+import { TOOLS as MCP_TOOLS, endPerfSession, validate as validateMcpArgs } from './mcp-tools.js';
+import { buildComponentModel, buildNodeModel, meshInstanceRows } from './node-model.js';
+import { PerfCapture } from './perf-capture.js';
+import { PerfCharts } from './perf-chart.js';
+import { captureJson, frameJson, rangeJson, seriesRows, toCsv } from './perf-copy.js';
+import { buildPerfModel, captureNorms, formatMs, isHitch } from './perf-view.js';
+import { AmmoDebugDraw, DEBUG_DRAW } from './physics-debug.js';
+import { bodyRows, drawCollisionShape, drawJoint, jointRows, physicsStats } from './physics-view.js';
+import { ImageCapture } from './image-capture.js';
+import { LogCapture } from './log-capture.js';
+import { PropertyView } from './property-view.js';
+import { RefRegistry } from './ref-registry.js';
+import { buildScriptModel, isScriptClass, scriptListRows, surveyScripts } from './script-view.js';
+import { buildRenderTargetModel, formatChannels, isDepthFormat, previewAttachments, previewSupport, renderTargetRows, storedBottomUp } from './render-target-view.js';
+import { buildShaderModel, collectShaders, shaderRows, stateName } from './shader-view.js';
+import { styles } from './styles.js';
+import { installTooltip, setTip } from './tooltip.js';
+import { CameraFly, CameraOrbit, CanvasCapture, RENDER_MODES, ViewportPicker, WireframeMode, isScreenCamera, screenCameraAt } from './viewport-tools.js';
+import { buildTextureModel, collectTextures, textureRows } from './texture-view.js';
+import { TRANSFORM_POINTER_EVENTS, TransformTool } from './transform-tool.js';
+
+/** @import { AppBase } from 'playcanvas' */
+/** @import { GraphicsDevice } from 'playcanvas' */
+/** @import { FrameSnapshot, PassModelContext } from './frame-graph-view.js' */
+/** @import { PropertyRow, PropertySection } from './model.js' */
+/** @import { MenuItem } from './context-menu.js' */
+/** @import { CopyOptions } from './copy-json.js' */
+/** @import { CopyTarget } from './property-view.js' */
+/** @import { TransformMode } from './transform-tool.js' */
+/** @import { McpHost, McpTool } from './mcp-tools.js' */
+
+/**
+ * Options for {@link Inspector}.
+ *
+ * @typedef {object} InspectorOptions
+ * @property {boolean} [visible] - Whether the panel starts shown. Defaults to true.
+ * @property {'left'|'right'} [dock] - The side of the viewport the panel docks to. Defaults to
+ * 'right'.
+ * @property {number} [width] - The width of the docked panel in CSS pixels. Defaults to 420.
+ * @property {number} [top] - A gap left above the panel in CSS pixels, to keep it clear of other
+ * overlays. Defaults to 0.
+ * @property {string} [toggleKey] - The `KeyboardEvent.code` or `key` that shows and hides the
+ * panel. Defaults to 'Backquote'. Empty disables the key.
+ * @property {string} [pauseKey] - The key that pauses and resumes the app. Defaults to 'F9'.
+ * @property {string} [stepKey] - The key that advances one frame while paused. Defaults to 'F10'.
+ * @property {GraphNode|null} [lockedNode] - A node whose enabled checkbox, and those of its
+ * ancestors, are withheld. A script hosting the inspector passes its own entity so the panel
+ * cannot switch itself off. Defaults to null.
+ * @property {boolean} [record] - Whether to start recording frames for the Performance tab right
+ * away, as if Record were pressed, so the capture begins with the first frame the app runs after
+ * the inspector is created. Defaults to false. See {@link Inspector#recording}.
+ * @property {boolean} [mcp] - Whether to offer the inspector's tools to AI agents right
+ * away, as if the MCP button was pressed. Defaults to false. A setting stored by the button takes
+ * precedence. See {@link Inspector#mcp}.
+ * @property {(visible: boolean) => void} [onVisibleChange] - Called with the new visibility
+ * whenever the panel is shown or hidden, whether through {@link Inspector#visible}, the toggle key
+ * or the panel's own close button.
+ * @property {string|null} [storageKey] - The local storage key the panel's settings are kept
+ * under, so they survive a reload or a restart of the app: the physics drawing switch and options,
+ * the bodies excluded from it (by entity path), the active tab, the panel width, the MCP switch,
+ * the GPU timings switch, and on the Performance tab the script timing switch, whether the CPU chart
+ * includes the inspector's time, the charts collapsed and lines hidden, and the script types the
+ * Scripts chart shows. Stored settings take
+ * precedence over the defaults given here. Defaults to
+ * 'pc-inspector'; null keeps nothing.
+ */
+
+/**
+ * Which parts of the physics world the Physics tab draws. Each option is a checkbox on the tab.
+ *
+ * @typedef {object} InspectorPhysicsDrawOptions
+ * @property {boolean} [wireframe] - Collision shapes, colored by activation state. Defaults to
+ * true.
+ * @property {boolean} [aabb] - Axis-aligned bounds of each body.
+ * @property {boolean} [contacts] - Contact points and normals from the last step.
+ * @property {boolean} [constraints] - Joint frames.
+ * @property {boolean} [limits] - Joint limits.
+ * @property {boolean} [normals] - Face normals of mesh shapes.
+ * @property {boolean} [frames] - Local axes of each body.
+ * @property {boolean} [keepAwake] - Stop bodies from falling asleep while drawing.
+ * @property {boolean} [depthTest] - Hide lines behind geometry.
+ * @property {number} [range] - Only draw lines within this distance of the camera, in meters. Zero
+ * draws everything.
+ * @ignore
+ */
+
+// the Bullet debug flag behind each boolean option
+const PHYSICS_FLAGS = {
+    wireframe: DEBUG_DRAW.WIREFRAME,
+    aabb: DEBUG_DRAW.AABB,
+    contacts: DEBUG_DRAW.CONTACT_POINTS,
+    constraints: DEBUG_DRAW.CONSTRAINTS,
+    limits: DEBUG_DRAW.CONSTRAINT_LIMITS,
+    normals: DEBUG_DRAW.NORMALS,
+    frames: DEBUG_DRAW.FRAMES,
+    keepAwake: DEBUG_DRAW.NO_DEACTIVATION
+};
+
+// seconds between refreshes of the active list, and of the selected item's properties
+const LIST_INTERVAL = 0.5;
+const PROPERTY_INTERVAL = 0.1;
+
+// seconds between refreshes of the Performance tab's frame details, which it redraws with its
+// charts at the same pace
+const PERF_PROPERTY_INTERVAL = 0.25;
+
+// the least height of the part above the splitter, and of the Performance tab's charts in it,
+// which scroll below that; the styles hold the same
+const MIN_TOP_HEIGHT = 60;
+const MIN_PERF_CHARTS_HEIGHT = 60;
+
+// the names a copy of each series of the Performance tab goes by
+const PERF_SERIES_NAMES = {
+    frame: 'Frame',
+    cpu: 'CPU',
+    gpu: 'GPU',
+    draws: 'Draw calls',
+    scripts: 'Scripts',
+    counters: 'Counters',
+    loading: 'Loading',
+    memory: 'Memory',
+    resources: 'Resources',
+    events: 'Events'
+};
+
+// the tooltips of the tabs
+const TAB_TIPS = {
+    hierarchy: 'The entity tree, and the components and properties of the selected entity',
+    cameras: 'The cameras of the scene in render order, with where they draw, their render mode and a way to fly each',
+    assets: 'The assets of the registry, and what uses each',
+    passes: 'The passes that rendered the last frame, with the layers, draws and targets of each',
+    perf: 'Record frames and chart their CPU and GPU time, draw calls, memory and events over the whole capture.\nClick a frame to see everything recorded for it, drag to select frames, scroll to zoom, Shift+drag to pan,\ndouble-click to see the whole capture. A dashed line marks the display interval, red ticks the hitches',
+    targets: 'The render targets on the device, with a live preview of their textures',
+    textures: 'The textures on the device, largest first, with a live preview',
+    meshes: 'The meshes of the app, found through the components, layers and assets using them, largest first',
+    materials: 'The materials of the app, found through the mesh instances and assets using them, most used first',
+    scripts: 'The script classes of the app, registered or found on its entities, with the entities using each and its source',
+    memory: 'Video memory by kind of resource, and every buffer on the device with what uses it',
+    shaders: 'The compiled shaders, with their sources',
+    physics: 'The rigid bodies and joints of the physics world, and its debug drawing'
+};
+
+const CHANNELS_TIP = 'Which channels of the texture to show. A single channel shows as grayscale';
+
+// how many links the deep copy follows until changed, and at most
+const COPY_DEPTH = 3;
+const MAX_COPY_DEPTH = 20;
+
+// events the panel swallows so that they never reach the input handlers of the app underneath
+const SWALLOWED_EVENTS = ['keydown', 'keyup', 'keypress', 'pointerdown', 'mousedown', 'wheel', 'touchstart', 'contextmenu'];
+
+/**
+ * @param {string} tag - The element tag.
+ * @param {string} className - The class name.
+ * @param {string} [text] - The text content.
+ * @returns {HTMLElement} The element.
+ */
+function el(tag, className, text) {
+    const element = document.createElement(tag);
+    element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+}
+
+/**
+ * A toolbar button showing one of the icons of the stylesheet. The label names it for screen
+ * readers, as the tooltip only shows on hover.
+ *
+ * @param {string} icon - The icon name, one of `ICONS` in the stylesheet.
+ * @param {string} label - The accessible name of the button.
+ * @returns {HTMLButtonElement} The button.
+ */
+function iconButton(icon, label) {
+    const button = /** @type {HTMLButtonElement} */ (el('button', `pci-btn pci-icon-btn pci-i-${icon}`));
+    button.setAttribute('aria-label', label);
+    return button;
+}
+
+/**
+ * @param {HTMLButtonElement} button - A button made by `iconButton`.
+ * @param {string} icon - The icon to show instead.
+ */
+function setIcon(button, icon) {
+    button.className = button.className.replace(/\bpci-i-\S+/, `pci-i-${icon}`);
+}
+
+/**
+ * @param {Event} e - A keyboard event.
+ * @returns {boolean} Whether the key went to a text field.
+ */
+function isTextTarget(e) {
+    const target = /** @type {HTMLInputElement|undefined} */ (e.composedPath()[0]);
+    if (!target) return false;
+    const tag = target.tagName;
+    if (tag === 'INPUT') {
+        // checkboxes and buttons take no text, so hotkeys stay live while one has focus
+        return !['checkbox', 'radio', 'button', 'range'].includes(target.type);
+    }
+    return tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+}
+
+/**
+ * An in-page inspector for a running application. It docks a panel over the canvas with thirteen
+ * tabs above a live property view of whatever is selected:
+ *
+ * - Hierarchy: the entity tree. The property view shows the node's transform, every component it
+ *   carries and every script instance with its attributes. The selected node is outlined in the
+ *   viewport.
+ * - Cameras: every camera in render order, with its target, viewport, layers and render mode. The
+ *   render mode of a camera can be switched to a debug view of the material inputs, the whole scene
+ *   drawn in wireframe, and any camera flown.
+ * - Assets: every asset in the registry with its file, load state and the components using it.
+ *   Asset references on a component link here, and a texture names the asset it came from.
+ * - Frame graph: the render passes of the last frame in execution order, as the render pass trace
+ *   prints them, with the layer steps of forward passes, the light of shadow passes and optional
+ *   GPU timings. Render target cells link to the next tab. With the debug engine, the debug frame
+ *   draws a forward pass only up to a chosen draw, stepped one draw at a time with the arrow keys.
+ * - Performance: frames recorded while Record is on, up to the last 1000, charted over
+ *   the whole capture: the frame interval, the CPU time on the main thread by phase, the GPU time,
+ *   the draw calls and video memory, and the events of each frame, such as shaders compiled and
+ *   the main thread blocked. Clicking a frame shows it on a timeline of its own and everything
+ *   recorded for it in the property view; dragging selects frames to compare their figures. The
+ *   inspector's own time is told apart from the app's.
+ * - Render targets: every render target on the device including the backbuffer, with its
+ *   attachments and the passes that rendered into it this frame, linking back to the frame graph.
+ *   The selected target's attachment can be previewed live in a corner of the viewport.
+ * - Textures: every texture on the device, largest GPU footprint first, with the same live preview.
+ *   Texture values elsewhere, such as the maps of a material, link here.
+ * - Meshes: every mesh found through the components, layers and assets using it, largest first,
+ *   with its geometry and users. Nothing keeps a list of meshes, so a note counts the vertex buffers
+ *   on the device that belong to no mesh found. Mesh values elsewhere link here.
+ * - Materials: every material found through the mesh instances and assets using it, most used
+ *   first, with its textures, compiled variants and users. Material values elsewhere link here, and
+ *   the Textures and Shaders tabs list the materials using a texture or shader.
+ * - Scripts: every script class the script registry holds or an entity uses, with the entities using
+ *   it, its declared attributes and its source as the browser keeps it. The script sections of an
+ *   entity link here.
+ * - Memory: video memory by kind of resource, each kind a group headed by its count and size that
+ *   opens to list its buffers largest first, named after the mesh, material or asset each was found
+ *   to belong to. Buffer values elsewhere link here.
+ * - Shaders: every shader on the device with its language, state and vertex attributes. The
+ *   compiled variants listed on a material link here.
+ * - Physics: the rigid bodies and joints of the scene, with the physics world drawn over the scene
+ *   through the engine's debug drawer when Ammo is loaded.
+ *
+ * The app can be paused and stepped a frame at a time, and the panel can be popped out into its own
+ * window to leave the canvas unobscured. In the view, an entity can be picked to select it, and the
+ * camera flown, or orbited around the selected entity, without moving the app's own camera.
+ *
+ * The inspector is read-only, apart from the checkbox on each hierarchy row, which flips the node's
+ * enabled flag, pausing and stepping the app, and view-only overrides: render modes, wireframe and
+ * a flown or orbited camera, which it removes when it closes.
+ *
+ * ```javascript
+ * const inspector = new Inspector(app, { dock: 'left' });
+ * inspector.visible = false; // show again with the backquote key
+ * ```
+ *
+ * Default keys: backquote toggles the panel, F9 pauses and resumes, F10 steps one frame while
+ * paused. Pausing sets {@link AppBase#timeScale} to zero and suspends the sound manager, so
+ * rendering continues while every time-driven system stands still. Scripts that read the wall
+ * clock rather than the frame delta keep moving.
+ *
+ * The property view is generic: it reflects on the public getters of each component and script,
+ * so components it has never heard of show up with all of their state.
+ *
+ * @category Debug
+ */
+class Inspector {
+    /**
+     * Called with the new visibility whenever the panel is shown or hidden, whether through
+     * {@link visible}, the toggle key or the panel's own close button. Set from the
+     * {@link InspectorOptions#onVisibleChange} option, or assigned later.
+     *
+     * @type {((visible: boolean) => void)|null}
+     */
+    onVisibleChange = null;
+
+    /**
+     * @type {AppBase}
+     * @private
+     */
+    _app;
+
+    /** @private */
+    _toggleKey = 'Backquote';
+
+    /** @private */
+    _pauseKey = 'F9';
+
+    /** @private */
+    _stepKey = 'F10';
+
+    /**
+     * @type {Color}
+     * @private
+     */
+    _highlightColor = new Color(1, 0.55, 0.1);
+
+    /**
+     * @type {GraphNode|null}
+     * @private
+     */
+    _lockedNode = null;
+
+    /** @private */
+    _visible = true;
+
+    /** @private */
+    _dock = 'right';
+
+    /** @private */
+    _width = 420;
+
+    /** @private */
+    _top = 0;
+
+    /** @private */
+    _paused = false;
+
+    /** @private */
+    _savedTimeScale = 1;
+
+    /** @private */
+    _destroyed = false;
+
+    /**
+     * @type {Window|null}
+     * @private
+     */
+    _popup = null;
+
+    /**
+     * @type {GraphNode|null}
+     * @private
+     */
+    _selected = null;
+
+    /**
+     * @type {HTMLElement|null}
+     * @private
+     */
+    _host = null;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _panel;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _hierarchyEl;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _filterInput;
+
+    /**
+     * What the hierarchy filter matches: entity names, component types or script names.
+     *
+     * @type {HTMLSelectElement}
+     * @private
+     */
+    _filterBy;
+
+    /**
+     * The values offered while filtering the hierarchy by component or script.
+     *
+     * @type {HTMLDataListElement}
+     * @private
+     */
+    _filterSuggestions;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _pauseBtn;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _stepBtn;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _popBtn;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _countsEl;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _pausedEl;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _pathEl;
+
+    /**
+     * What the view is doing while it is picked, flown or orbited.
+     *
+     * @type {HTMLElement}
+     * @private
+     */
+    _modeEl;
+
+    /**
+     * @type {HierarchyView}
+     * @private
+     */
+    _hierarchy;
+
+    /**
+     * @type {PropertyView}
+     * @private
+     */
+    _properties;
+
+    /**
+     * @type {WireRenderer}
+     * @private
+     */
+    _wire;
+
+    /** @private */
+    _nextListRefresh = 0;
+
+    /** @private */
+    _nextPropertyRefresh = 0;
+
+    /**
+     * @type {'hierarchy'|'cameras'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'}
+     * @private
+     */
+    _tab = 'hierarchy';
+
+    /**
+     * The frames recorded for the Performance tab. Hooked into the app only while recording.
+     *
+     * @type {PerfCapture}
+     * @private
+     */
+    _perf;
+
+    /**
+     * The charts of the Performance tab, and the frame they show.
+     *
+     * @type {PerfCharts}
+     * @private
+     */
+    _perfCharts;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _perfRecordBtn;
+
+    /**
+     * Shows the newest frame, and keeps following it as frames are recorded.
+     *
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _perfLastBtn;
+
+    /**
+     * The GPU timings switch of the Performance tab, kept in step with the Frame graph's.
+     *
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _perfGpuToggle;
+
+    /**
+     * Whether the CPU chart includes the inspector's own time.
+     *
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _perfInspectorToggle;
+
+    /**
+     * Whether to time each script type while recording.
+     *
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _perfScriptsToggle;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _perfNote;
+
+    /**
+     * The filter bar, which the Performance tab has no list for.
+     *
+     * @type {HTMLElement}
+     * @private
+     */
+    _filterEl;
+
+    /**
+     * Model builder for the property view on the Performance tab: the frames the charts show.
+     *
+     * @param {PerfCharts} charts - The charts.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _perfModel = charts => buildPerfModel({
+        capture: this._perf,
+        seq: charts.shown,
+        range: charts.range,
+        gpu: {
+            supported: !!this._app.graphicsDevice.gpuProfiler,
+            enabled: !!this._app.graphicsDevice.gpuProfiler?.enabled,
+            enable: () => this._setGpuTimings(true)
+        },
+        scripts: {
+            enabled: this._perf.timeScripts,
+            enable: () => this._setScriptTiming(true),
+            rows: charts.scriptRows,
+            pinned: charts.pinned,
+            pin: name => charts.togglePin(name)
+        }
+    });
+
+    /**
+     * @type {FrameSnapshot|null}
+     * @private
+     */
+    _frame = null;
+
+    /** @private */
+    _frozen = false;
+
+    /** @private */
+    _gpuWasEnabled = false;
+
+    /**
+     * @type {Record<string, HTMLElement>}
+     * @private
+     */
+    _tabButtons = {};
+
+    /**
+     * @type {Record<string, HTMLElement>}
+     * @private
+     */
+    _panels = {};
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _passList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _targetList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _bodyList;
+
+    /**
+     * The gizmo that moves, rotates or scales the selected entity, while one of its buttons is on.
+     *
+     * @type {TransformTool|null}
+     * @private
+     */
+    _transformTool = null;
+
+    /**
+     * The buttons of the gizmos, by what each does.
+     *
+     * @type {Record<TransformMode, HTMLButtonElement>}
+     * @private
+     */
+    _transformBtns;
+
+    /**
+     * The menu opened with a right click, which copies what it was opened on.
+     *
+     * @type {ContextMenu|null}
+     * @private
+     */
+    _menu = null;
+
+    /**
+     * How many links the menu's deep copy follows.
+     *
+     * @type {number}
+     * @private
+     */
+    _copyDepth = COPY_DEPTH;
+
+    /**
+     * Draws the selected render target's texture over the canvas, straight from the GPU.
+     *
+     * @type {TextureRenderer}
+     * @private
+     */
+    _textures;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _previewToggle;
+
+    /**
+     * @type {HTMLSelectElement}
+     * @private
+     */
+    _previewAttachment;
+
+    /**
+     * @type {HTMLSelectElement}
+     * @private
+     */
+    _previewChannels;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _previewNote;
+
+    /**
+     * The attachment keys the selector currently offers, to rebuild it only when they change.
+     *
+     * @private
+     */
+    _previewKeys = '';
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _textureList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _shaderList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _assetList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _bufferList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _meshList;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _meshNote;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _materialList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _scriptList;
+
+    /**
+     * @type {ListView}
+     * @private
+     */
+    _cameraList;
+
+    /**
+     * The render mode applied from the Cameras tab.
+     *
+     * @type {HTMLSelectElement}
+     * @private
+     */
+    _renderMode;
+
+    /**
+     * Whether the render mode applies to the selected camera or to all of them.
+     *
+     * @type {HTMLSelectElement}
+     * @private
+     */
+    _renderScope;
+
+    /**
+     * The cameras last listed in the render mode scope, to rebuild it only when they change.
+     *
+     * @type {string}
+     * @private
+     */
+    _scopeSignature = '';
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _wireframeToggle;
+
+    /**
+     * Ends the render mode changes and wireframe.
+     *
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _resetViewBtn;
+
+    /**
+     * The shader pass each camera the panel changed had before, to put back.
+     *
+     * @type {Map<CameraComponent, string|null>}
+     * @private
+     */
+    _changedPasses = new Map();
+
+    /** @private */
+    _wireframe = new WireframeMode();
+
+    /**
+     * @type {ViewportPicker|null}
+     * @private
+     */
+    _picker = null;
+
+    /**
+     * The pointer events taken while picking, or while waiting for a click choosing the camera to
+     * fly, null otherwise.
+     *
+     * @type {CanvasCapture|null}
+     * @private
+     */
+    _canvasCapture = null;
+
+    /**
+     * What the canvas capture is for.
+     *
+     * @type {'pick'|'choose'|null}
+     * @private
+     */
+    _canvasMode = null;
+
+    /**
+     * The entity under the pointer while picking.
+     *
+     * @type {Entity|null}
+     * @private
+     */
+    _hovered = null;
+
+    /**
+     * The camera driven by Fly or Orbit, while one is.
+     *
+     * @type {CameraFly|CameraOrbit|null}
+     * @private
+     */
+    _fly = null;
+
+    /**
+     * Which of Fly and Orbit waits for the view of a camera to be clicked, while one does.
+     *
+     * @type {'fly'|'orbit'}
+     * @private
+     */
+    _chooseKind = 'fly';
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _pickBtn;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _flyBtn;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _orbitBtn;
+
+    /** @private */
+    _hoverColor = new Color(0.35, 0.8, 1);
+
+    /**
+     * The latest pointer position to pick under while hovering, null once it has been picked.
+     *
+     * @type {number[]|null}
+     * @private
+     */
+    _hoverPoint = null;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _passPreviewToggle;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _debugFrameToggle;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _passNote;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _debugEl;
+
+    /**
+     * The debug frame while it is on: the layer step it stops in, by its list key, the draw it stops
+     * at within that step's list, and the instance drawn last, which keeps the choice when the sort
+     * order shifts. Null while it is off.
+     *
+     * @type {{ stepKey: string|null, index: number, instance: MeshInstance|null, wasPaused: boolean }|null}
+     * @private
+     */
+    _debugFrame = null;
+
+    /**
+     * The link or row the pointer is over, with a function reading its current target, so a texture
+     * or render target can preview while hovered.
+     *
+     * @type {{ el: HTMLElement, target: () => * }|null}
+     * @private
+     */
+    _hoverLink = null;
+
+    /**
+     * The page each forward pass layer step shows, by pass row key and step, kept across refreshes.
+     *
+     * @type {Map<string, number>}
+     * @private
+     */
+    _instancePages = new Map();
+
+    /**
+     * Model builder for the property view when a buffer is selected.
+     *
+     * @param {*} buffer - The buffer.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _bufferModel = buffer => buildBufferModel(buffer, this._context());
+
+    /**
+     * Model builder for the property view when a mesh is selected.
+     *
+     * @param {Mesh} mesh - The mesh.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _meshModel = mesh => buildMeshModel(mesh, this._context());
+
+    /**
+     * Model builder for the property view when a material is selected.
+     *
+     * @param {Material} material - The material.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _materialModel = material => buildMaterialModel(material, this._context());
+
+    /**
+     * Model builder for the property view when a camera is selected.
+     *
+     * @param {CameraComponent} camera - The camera.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _cameraModel = camera => buildCameraModel(camera, {
+        app: this._app,
+        cameraActions: {
+            fly: target => this._startFly(target),
+            flying: this._fly?.camera ?? null,
+            unavailable: this._transformTool ? 'Turn the gizmo off to fly a camera' : null
+        }
+    });
+
+    /**
+     * Model builder for the property view when a script class is selected.
+     *
+     * @param {Function} cls - The script class.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _scriptModel = cls => buildScriptModel(cls, this._context());
+
+    /**
+     * Model builder for the property view when a shader is selected, followed by the materials that
+     * compiled it.
+     *
+     * @param {Shader} shader - The shader.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _shaderModel = shader => [...buildShaderModel(shader), usedByMaterialsSection(materialsUsingShader(this._app, shader))];
+
+    /**
+     * @type {HTMLSelectElement}
+     * @private
+     */
+    _assetSort;
+
+    /**
+     * Model builder for the property view when an asset is selected, with what uses its resource
+     * directly added to the components referencing it.
+     *
+     * @param {Asset} asset - The asset.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _assetModel = (asset) => {
+        const sections = buildAssetModel(asset, this._context());
+        const users = sections.find(section => section.key === 'users');
+        if (users) pushResourceUsage(users, asset, this._app);
+        return sections;
+    };
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _texturePreviewToggle;
+
+    /**
+     * @type {HTMLSelectElement}
+     * @private
+     */
+    _textureChannels;
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _textureNote;
+
+    /**
+     * Model builder for the property view when a texture is selected, followed by the materials
+     * sampling it.
+     *
+     * @param {Texture} texture - The texture.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _textureModel = texture => [
+        ...buildTextureModel(texture, this._context()),
+        usedByMaterialsSection(materialsUsingTexture(this._app, texture))
+    ];
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _gpuToggle;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _freezeToggle;
+
+    /**
+     * @type {AmmoDebugDraw|null}
+     * @private
+     */
+    _physics = null;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _drawToggle;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _depthToggle;
+
+    /**
+     * @type {HTMLInputElement}
+     * @private
+     */
+    _rangeInput;
+
+    /**
+     * The checkbox of each boolean physics draw option, by option name.
+     *
+     * @type {Record<string, HTMLInputElement>}
+     * @private
+     */
+    _physicsToggles = {};
+
+    /**
+     * @type {HTMLElement}
+     * @private
+     */
+    _physicsNote;
+
+    /**
+     * The bar holding the options governed by the Draw switch.
+     *
+     * @type {HTMLElement}
+     * @private
+     */
+    _physicsOptionsBar;
+
+    /**
+     * Bodies excluded from the physics drawing, with the native body the exclusion was applied to,
+     * or null while the entity has no native body yet.
+     *
+     * @type {Map<Entity, any>}
+     * @private
+     */
+    _hiddenBodies = new Map();
+
+    /**
+     * Entity paths of excluded bodies restored from storage, waiting for the entities to exist.
+     *
+     * @type {Set<string>}
+     * @private
+     */
+    _pendingHiddenPaths = new Set();
+
+    /**
+     * @type {string|null}
+     * @private
+     */
+    _storageKey = 'pc-inspector';
+
+    /**
+     * Whether the tools are offered to agents, see {@link Inspector#mcp}.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _mcp = false;
+
+    /**
+     * Aborted to withdraw the tools registered with WebMCP.
+     *
+     * @type {AbortController|null}
+     * @private
+     */
+    _mcpAbort = null;
+
+    /**
+     * @type {HTMLButtonElement}
+     * @private
+     */
+    _mcpBtn;
+
+    /**
+     * The ids of the objects the tools return, which stay the same for the life of the inspector.
+     *
+     * @type {RefRegistry}
+     * @private
+     */
+    _refs = new RefRegistry();
+
+    /**
+     * What the tools read the app through.
+     *
+     * @type {McpHost}
+     * @private
+     */
+    _mcpHost = {
+        app: /** @type {any} */ (null),
+        refs: this._refs,
+        modelFor: (obj, subject) => this._mcpModel(obj, subject),
+        opaque: (obj) => {
+            this._mcpOpaque ??= this._opaqueObjects();
+            return this._mcpOpaque.has(obj);
+        },
+        exclude: obj => obj === this._transformTool?.root,
+        frame: () => {
+            this._mcpFrame ??= this._frozen && this._frame ? this._frame : captureFrameGraph(this._app);
+            return this._mcpFrame;
+        },
+        perf: {
+            capture: /** @type {any} */ (null),
+            setRecording: (on) => {
+                this._setRecording(on);
+            },
+            setGpuTimings: (on) => {
+                this._setGpuTimings(on);
+            },
+            setScriptTiming: (on) => {
+                this._setScriptTiming(on);
+            },
+            clear: () => {
+                this._perf.clear();
+                this._perfCharts.reset();
+            },
+            gpuSupported: () => !!this._app.graphicsDevice.gpuProfiler,
+            gpuTimings: () => !!this._app.graphicsDevice.gpuProfiler?.enabled,
+            paused: () => this._paused,
+            device: () => this._deviceInfo(),
+            byAgent: false,
+            session: null
+        },
+        logs: new LogCapture(() => this._app?.frame ?? 0),
+        images: () => {
+            this._images ??= new ImageCapture(this._app);
+            return this._images;
+        },
+        time: {
+            paused: () => this._paused,
+            setPaused: (paused) => {
+                this.paused = paused;
+            },
+            step: (frames, timeout) => this._stepFrames(frames, timeout),
+            frame: () => this._app.frame ?? 0
+        }
+    };
+
+    /**
+     * Captures images for the screenshot tool, made on first use.
+     *
+     * @type {ImageCapture|null}
+     * @private
+     */
+    _images = null;
+
+    /**
+     * The frame graph and the app's own objects, found once per tool call.
+     *
+     * @type {*}
+     * @private
+     */
+    _mcpFrame = null;
+
+    /**
+     * @type {Set<object>|null}
+     * @private
+     */
+    _mcpOpaque = null;
+
+    /**
+     * True while the panel is being built and restored, when nothing should be saved.
+     *
+     * @private
+     */
+    _restoring = true;
+
+    /**
+     * Model builder for the property view when a pass is selected.
+     *
+     * @param {FramePass} pass - The pass.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _passModel = pass => buildPassModel(pass, this._context());
+
+    /**
+     * Model builder for the property view when a layer step of a forward pass is selected.
+     *
+     * @param {LayerStepSelection} selection - The step and its pass.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _stepModel = selection => buildStepModel(selection, this._context());
+
+    /**
+     * @param {*} item - What a row of the pass list selects: a pass, or one of its layer steps.
+     * @returns {(subject: *) => PropertySection[]} The model builder that shows it.
+     * @private
+     */
+    _passListModel(item) {
+        return item instanceof LayerStepSelection ? this._stepModel : this._passModel;
+    }
+
+    /**
+     * Model builder for the property view when a render target is selected.
+     *
+     * @param {RenderTarget} rt - The render target.
+     * @returns {PropertySection[]} The sections.
+     * @private
+     */
+    _targetModel = rt => buildRenderTargetModel(rt, this._context());
+
+    /**
+     * Creates the inspector and shows its panel. The panel is appended to the document body and
+     * follows the app until {@link destroy} is called, or the app is destroyed.
+     *
+     * @param {AppBase} app - The app to inspect.
+     * @param {InspectorOptions} [options] - The options.
+     * @example
+     * const inspector = new Inspector(app, { dock: 'left', width: 480 });
+     */
+    constructor(app, options = {}) {
+        this._app = app;
+
+        if (options.toggleKey !== undefined) this._toggleKey = options.toggleKey;
+        if (options.pauseKey !== undefined) this._pauseKey = options.pauseKey;
+        if (options.stepKey !== undefined) this._stepKey = options.stepKey;
+        this._lockedNode = options.lockedNode ?? null;
+        this.onVisibleChange = options.onVisibleChange ?? null;
+        this._visible = options.visible ?? true;
+        this._dock = options.dock === 'left' ? 'left' : 'right';
+        this._width = Math.max(240, Math.min(1600, options.width ?? 420));
+        this._top = Math.max(0, options.top ?? 0);
+
+        this._wire = new WireRenderer(app);
+        this._textures = new TextureRenderer(app);
+        this._perf = new PerfCapture(app);
+        this._buildDom();
+        this._hierarchy.setRoot(app.root);
+        this._gpuWasEnabled = !!app.graphicsDevice.gpuProfiler?.enabled;
+        this._physics = new AmmoDebugDraw(app);
+        this._physicsDrawOptions = { wireframe: true };
+        this._physicsDraw = false;
+        this._setTab('hierarchy');
+        this._storageKey = options.storageKey === undefined ? 'pc-inspector' : options.storageKey;
+        this._mcpHost.app = app;
+        this._mcpHost.perf.capture = this._perf;
+        this._mcp = !!options.mcp;
+        this._loadSettings();
+        this._applyMcp();
+        this._applyLayout();
+        this._applyVisibility();
+        this._applyPauseState();
+        this._refresh();
+        if (options.record) this._setRecording(true);
+        this._restoring = false;
+
+        window.addEventListener('keydown', this._onKeyDown);
+        // ahead of every listener of the app and of the panel's own modes added later, so a gizmo
+        // being dragged keeps the pointer to itself
+        for (const type of TRANSFORM_POINTER_EVENTS) window.addEventListener(type, this._onTransformPointer, { capture: true, passive: false });
+        // the app fires 'update' after every component system has updated, so the physics step of
+        // the frame is done by the time the world is drawn
+        app.on('update', this._onUpdate, this);
+        app.on('destroy', this.destroy, this);
+    }
+
+    /**
+     * Removes the panel, releases every hook into the app and restores anything the inspector
+     * changed: the time scale while paused, the GPU profiler, the physics debug drawer.
+     */
+    destroy() {
+        if (this._destroyed) return;
+        this._destroyed = true;
+
+        const app = this._app;
+        app.off('update', this._onUpdate, this);
+        app.off('destroy', this.destroy, this);
+        window.removeEventListener('keydown', this._onKeyDown);
+        for (const type of TRANSFORM_POINTER_EVENTS) window.removeEventListener(type, this._onTransformPointer, { capture: true });
+        this._setDebugFrame(false);
+        this._endViewportModes();
+        this._picker?.destroy();
+        this._picker = null;
+
+        this.paused = false;
+        this._mcpAbort?.abort();
+        this._mcpAbort = null;
+        endPerfSession(this._mcpHost, 'inspector destroyed');
+        this._mcpHost.logs.stop();
+        this._images?.destroy();
+        this._images = null;
+        this._perf.destroy();
+        this._perfCharts.destroy();
+        const profiler = app.graphicsDevice?.gpuProfiler;
+        if (profiler) profiler.enabled = this._gpuWasEnabled;
+        this._pruneHiddenBodies();
+        this._physics?.detach();
+        this._physics = null;
+        this._hiddenBodies.clear();
+
+        if (this._popup) this._dockBack();
+        this._menu?.destroy();
+        this._menu = null;
+        this._textures.destroy();
+        this._host?.remove();
+        this._host = null;
+    }
+
+    /**
+     * Whether the panel is shown. Toggled by the toggle key.
+     *
+     * @type {boolean}
+     */
+    set visible(value) {
+        value = !!value;
+        // a hidden panel leaves nothing on screen saying the frame is cut short
+        if (!value && this._debugFrame) this._setDebugFrame(false);
+        // nor that the view is being picked, flown, or drawn differently
+        if (!value) this._endViewportModes();
+        const changed = value !== this._visible;
+        this._visible = value;
+        if (this._host) {
+            if (!value && this._popup) this._dockBack();
+            this._applyVisibility();
+            if (value) this._refresh();
+        }
+        if (changed) this.onVisibleChange?.(value);
+    }
+
+    get visible() {
+        return this._visible;
+    }
+
+    /**
+     * Whether the inspector offers its tools to AI agents: tools that read the app as the panel
+     * shows it, the hierarchy, the lists of its tabs and any object by id, and tools that record
+     * frames on the Performance tab and read what they recorded. None of them changes the app;
+     * the recording tools change only the inspector's capture and its timing switches. Toggled by
+     * the MCP button of the toolbar, and kept on while the panel is hidden.
+     *
+     * While on, the tools are registered with WebMCP (`document.modelContext`) where the browser
+     * has it, for agents running in the browser, and can be called from the page through
+     * {@link Inspector#getTools} and {@link Inspector#executeTool}, for agents driving the page,
+     * such as through Puppeteer.
+     *
+     * @type {boolean}
+     */
+    set mcp(value) {
+        value = !!value;
+        if (value === this._mcp || this._destroyed) return;
+        this._mcp = value;
+        this._applyMcp();
+        this._saveSettings();
+    }
+
+    get mcp() {
+        return this._mcp;
+    }
+
+    /**
+     * Whether the browser has WebMCP, through which agents running in the browser find the tools
+     * of {@link Inspector#mcp}. Without it, the tools are still offered through
+     * {@link Inspector#executeTool}.
+     *
+     * @type {boolean}
+     */
+    static get webMcpSupported() {
+        return typeof document !== 'undefined' && typeof /** @type {any} */ (document).modelContext?.registerTool === 'function';
+    }
+
+    /**
+     * The tools offered while {@link Inspector#mcp} is on, described the way MCP describes them.
+     *
+     * @returns {McpTool[]} The tools, none while it is off.
+     */
+    getTools() {
+        if (!this._mcp) return [];
+        return MCP_TOOLS.map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
+    }
+
+    /**
+     * Calls one of the tools of {@link Inspector#getTools}.
+     *
+     * @param {string} name - The name of the tool.
+     * @param {object} [args] - Its arguments, as its input schema describes them.
+     * @returns {Promise<*>} The result, as JSON-ready data. Rejects when the tools are off, the tool
+     * is unknown or the arguments are wrong.
+     * @example
+     * inspector.mcp = true;
+     * const { entities } = await inspector.executeTool('playcanvas_find_entities', { name: 'Robot' });
+     * const robot = await inspector.executeTool('playcanvas_get', { id: entities[0].$id });
+     */
+    async executeTool(name, args = {}) {
+        if (!this._mcp) throw new Error('The inspector\'s MCP tools are off');
+        const tool = MCP_TOOLS.find(t => t.name === name);
+        if (!tool) throw new Error(`Unknown tool "${name}"`);
+        validateMcpArgs(tool, args ?? {});
+        try {
+            return await tool.execute(this._mcpHost, args ?? {});
+        } finally {
+            this._mcpFrame = null;
+            this._mcpOpaque = null;
+        }
+    }
+
+    /**
+     * Registers the tools with WebMCP while {@link Inspector#mcp} is on, withdraws them while it is
+     * off, and shows the state on the toolbar button.
+     *
+     * @private
+     */
+    _applyMcp() {
+        if (this._mcp && !this._mcpAbort) {
+            this._mcpAbort = new AbortController();
+            this._mcpHost.logs.start();
+            const context = Inspector.webMcpSupported ? /** @type {any} */ (document).modelContext : null;
+            if (context) {
+                const signal = this._mcpAbort.signal;
+                for (const { name, description, inputSchema, annotations } of MCP_TOOLS) {
+                    // a failure is returned as an error result rather than thrown, as the browser
+                    // hands the agent a generic error in place of a thrown one's message
+                    const execute = async (args) => {
+                        try {
+                            const result = await this.executeTool(name, args);
+                            // an image goes to the agent as an image, with what it shows as text
+                            if (result?.$image) {
+                                const { $image, ...rest } = result;
+                                return { content: [{ type: 'image', data: $image.data, mimeType: $image.mimeType }, { type: 'text', text: JSON.stringify(rest) }] };
+                            }
+                            return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+                        } catch (e) {
+                            return { content: [{ type: 'text', text: `${e?.message ?? e}` }], isError: true };
+                        }
+                    };
+                    // registering returns a promise, which rejects on a name already registered,
+                    // such as by a second inspector in the page
+                    Promise.resolve()
+                    .then(() => context.registerTool({ name, description, inputSchema, annotations, execute }, { signal }))
+                    .catch(e => console.warn(`Inspector: could not register the WebMCP tool ${name}: ${e?.message ?? e}`));
+                }
+            }
+        } else if (!this._mcp && this._mcpAbort) {
+            this._mcpAbort.abort();
+            this._mcpAbort = null;
+            // a recording the tools were to stop stops with them
+            endPerfSession(this._mcpHost, 'MCP turned off');
+            this._mcpHost.logs.stop();
+        }
+
+        if (this._mcpBtn) {
+            this._mcpBtn.classList.toggle('pci-active', this._mcp);
+            const how = Inspector.webMcpSupported ?
+                'registered with WebMCP, and callable from the page through executeTool' :
+                'callable from the page through executeTool. This browser has no WebMCP, so agents in the browser do not see them';
+            setTip(this._mcpBtn, this._mcp ?
+                `MCP on: tools for AI agents are ${how}. They stay on while the panel is hidden. Click to turn them off` :
+                'MCP: offer tools to AI agents, which read the hierarchy, the lists of the tabs and any object by id, take screenshots of the canvas and of textures, read what the page logs, record on the Performance tab, and pause and step the app. Nothing else in the app is changed');
+        }
+    }
+
+    /**
+     * The model the tools show an object with: for the object asked for, what its tab shows,
+     * with the lists of what uses it; for an object reached through a link, what a copy follows,
+     * see {@link Inspector#_copyModel}. Neither narrows to the filter of the panel.
+     *
+     * @param {object} obj - The object.
+     * @param {boolean} subject - Whether it is the object asked for.
+     * @returns {PropertySection[]|PropertyRow[]|null} The model, or null for an object no tab shows.
+     * @private
+     */
+    _mcpModel(obj, subject) {
+        const ctx = { ...this._context(), frame: this._mcpHost.frame(), filter: '' };
+        if (!subject) return this._copyModel(obj, { ...ctx, backlinks: false });
+        if (obj instanceof Texture) return [...buildTextureModel(obj, ctx), usedByMaterialsSection(materialsUsingTexture(this._app, obj))];
+        if (obj instanceof Shader) return [...buildShaderModel(obj), usedByMaterialsSection(materialsUsingShader(this._app, obj))];
+        if (obj instanceof Asset) {
+            const sections = buildAssetModel(obj, ctx);
+            const users = sections.find(section => section.key === 'users');
+            if (users) pushResourceUsage(users, obj, this._app);
+            return sections;
+        }
+        return this._copyModel(obj, { ...ctx, backlinks: true });
+    }
+
+    /**
+     * Whether the app is paused. Pausing sets {@link AppBase#timeScale} to zero and suspends the
+     * sound manager; resuming restores the time scale that was in effect.
+     *
+     * @type {boolean}
+     */
+    set paused(value) {
+        value = !!value;
+        if (value === this._paused) return;
+        this._paused = value;
+
+        const app = this._app;
+        if (value) {
+            this._savedTimeScale = app.timeScale;
+            app.timeScale = 0;
+            app.soundManager?.suspend();
+        } else {
+            app.timeScale = this._savedTimeScale;
+            app.soundManager?.resume();
+        }
+
+        this._applyPauseState();
+        if (value) this._refresh();
+    }
+
+    get paused() {
+        return this._paused;
+    }
+
+    /**
+     * Whether frames are being recorded for the Performance tab, as its Record button shows. Set it
+     * to start or stop a capture from code, such as around a part of the app to profile. Starting
+     * adds to the frames kept, up to the last 1000; the tab's Clear button forgets them.
+     *
+     * @type {boolean}
+     * @example
+     * inspector.recording = true;
+     * await loadLevel();
+     * inspector.recording = false;
+     */
+    set recording(value) {
+        value = !!value;
+        if (this._destroyed || value === this._perf.recording) return;
+        this._setRecording(value);
+    }
+
+    get recording() {
+        return this._perf.recording;
+    }
+
+    /**
+     * Whether the physics world is drawn over the scene while the panel is shown: the Draw checkbox
+     * of the Physics tab. Hiding the panel suspends the drawing; showing it again resumes it.
+     *
+     * @type {boolean}
+     * @private
+     */
+    set _physicsDraw(value) {
+        this._drawToggle.checked = !!value;
+        this._applyPhysicsSettings();
+    }
+
+    /**
+     * @returns {boolean} Whether the physics world is drawn.
+     * @private
+     */
+    get _physicsDraw() {
+        return this._drawToggle.checked;
+    }
+
+    /**
+     * Which parts of the physics world are drawn, mirroring the checkboxes of the Physics tab.
+     * Assigning a partial object changes only the options it names.
+     *
+     * @type {InspectorPhysicsDrawOptions}
+     * @private
+     */
+    set _physicsDrawOptions(value) {
+        for (const key of Object.keys(PHYSICS_FLAGS)) {
+            if (value[key] !== undefined) this._physicsToggles[key].checked = !!value[key];
+        }
+        if (value.depthTest !== undefined) this._depthToggle.checked = !!value.depthTest;
+        if (value.range !== undefined) this._rangeInput.value = String(Math.max(0, value.range || 0));
+        this._applyPhysicsSettings();
+    }
+
+    /**
+     * @returns {InspectorPhysicsDrawOptions} Which parts of the physics world are drawn.
+     * @private
+     */
+    get _physicsDrawOptions() {
+        /** @type {InspectorPhysicsDrawOptions} */
+        const options = {};
+        for (const key of Object.keys(PHYSICS_FLAGS)) {
+            options[key] = this._physicsToggles[key].checked;
+        }
+        options.depthTest = this._depthToggle.checked;
+        options.range = Math.max(0, parseFloat(this._rangeInput.value) || 0);
+        return options;
+    }
+
+    /**
+     * Advances the app by one frame. Only meaningful while paused.
+     */
+    step() {
+        if (!this._paused) return;
+        const app = this._app;
+        app.timeScale = this._savedTimeScale;
+        app.once('frameend', () => {
+            if (this._paused) app.timeScale = 0;
+        });
+    }
+
+    /**
+     * Pauses the app if it is not, then runs frames with time moving, as pressing Step that many
+     * times does, and holds it paused again.
+     *
+     * @param {number} frames - How many frames to run.
+     * @param {number} timeout - How long to wait for them, in milliseconds.
+     * @returns {Promise<number>} How many frames ran: fewer when the timeout came first.
+     * @private
+     */
+    _stepFrames(frames, timeout) {
+        this.paused = true;
+        const app = this._app;
+        app.timeScale = this._savedTimeScale;
+        return new Promise((resolve) => {
+            const pending = { ran: 0, timer: /** @type {any} */ (null) };
+            // called after each frame, and once by the timeout
+            const tick = (timedOut = false) => {
+                if (!timedOut && ++pending.ran < frames && this._paused) return;
+                app.off('frameend', tick);
+                clearTimeout(pending.timer);
+                if (this._paused) app.timeScale = 0;
+                this._refresh();
+                resolve(pending.ran);
+            };
+            pending.timer = setTimeout(() => tick(true), timeout);
+            app.on('frameend', tick);
+        });
+    }
+
+    /**
+     * Refreshes the active list and the property view immediately.
+     *
+     * @private
+     */
+    _refresh() {
+        if (!this._host) return;
+        this._refreshLists(true);
+        this._properties.refresh();
+    }
+
+    /**
+     * Moves the panel into its own browser window, leaving the canvas unobscured. Must be called
+     * from a user gesture, or the browser blocks the window.
+     *
+     * @private
+     */
+    _popOut() {
+        if (this._popup) {
+            this._popup.focus();
+            return;
+        }
+        this._menu?.hide();
+
+        const height = Math.max(480, Math.round(window.innerHeight * 0.9));
+        const popup = window.open('', 'pc-inspector', `popup=yes,width=${this._width},height=${height}`);
+        if (!popup) {
+            // blocked by the browser: say so on the button rather than silently doing nothing
+            this._popBtn.classList.add('pci-warn');
+            setTip(this._popBtn, 'The browser blocked the window. Allow pop-ups for this page to pop the panel out');
+            setTimeout(() => this._applyLayout(), 4000);
+            return;
+        }
+
+        const doc = popup.document;
+        doc.title = 'Inspector';
+        doc.documentElement.style.height = '100%';
+        doc.body.style.cssText = 'margin: 0; height: 100%; background: #182022; overflow: hidden;';
+        doc.body.appendChild(doc.adoptNode(this._host));
+
+        popup.addEventListener('pagehide', this._onPopupHide);
+        popup.addEventListener('keydown', this._onKeyDown);
+
+        this._popup = popup;
+        this._applyLayout();
+    }
+
+    /**
+     * Brings a popped-out panel back into the page and closes its window.
+     *
+     * @private
+     */
+    _dockBack() {
+        const popup = this._popup;
+        if (!popup) return;
+        this._popup = null;
+        this._menu?.hide();
+
+        popup.removeEventListener('pagehide', this._onPopupHide);
+        popup.removeEventListener('keydown', this._onKeyDown);
+
+        try {
+            document.body.appendChild(document.adoptNode(this._host));
+        } catch {
+            // the document that held the panel is gone, so the panel is too: build it anew
+            const selected = this._selected;
+            this._host.remove?.();
+            this._perfCharts.destroy();
+            this._buildDom();
+            this._hierarchy.setRoot(this._app.root);
+            if (selected) this._hierarchy.select(selected);
+            this._applyPauseState();
+        }
+
+        if (!popup.closed) popup.close();
+        this._applyLayout();
+        this._applyVisibility();
+    }
+
+    /**
+     * Runs the panel's work for the frame, timed so a capture can tell it apart from the app's own:
+     * it runs inside the app's update.
+     *
+     * @param {number} dt - The frame delta, scaled by the app time scale.
+     * @private
+     */
+    _onUpdate(dt) {
+        const start = performance.now();
+        this._updatePanel(dt);
+        this._perf.addOverhead(start, performance.now() - start);
+    }
+
+    /**
+     * @param {number} dt - The frame delta, scaled by the app time scale.
+     * @private
+     */
+    _updatePanel(dt) {
+        this._drawPhysics();
+
+        // the user closed the pop-out window: bring the panel home
+        if (this._popup?.closed) this._dockBack();
+
+        if (!this._visible) return;
+
+        // wall clock, as the frame delta is zero while paused
+        const now = performance.now();
+
+        // the charts of the Performance tab redraw on their own pace; the list and property
+        // refreshes wait for a frame without a redraw, so no one frame takes the cost of all three
+        const perfDrew = this._tab === 'perf' && this._perfCharts.update(now);
+
+        if (now >= this._nextListRefresh && !perfDrew) {
+            this._nextListRefresh = now + LIST_INTERVAL * 1000;
+            this._refreshLists(true);
+            // mesh instances the app added since are drawn in wireframe too
+            if (this._wireframeToggle.checked) this._wireframe.apply(this._app);
+        }
+
+        if (this._canvasMode === 'pick' && this._hovered) this._drawHighlight(this._hovered, this._hoverColor);
+        if (this._tab === 'cameras' && this._cameraList.selected && this._cameraList.selected !== this._fly?.camera) {
+            this._drawHighlight(this._cameraList.selected.entity);
+        }
+        this._updateModeStatus();
+        if (now >= this._nextPropertyRefresh && !perfDrew) {
+            this._nextPropertyRefresh = now + (this._tab === 'perf' ? PERF_PROPERTY_INTERVAL : PROPERTY_INTERVAL) * 1000;
+            this._properties.refresh();
+        }
+
+        if (this._tab === 'hierarchy' && this._selected) {
+            this._drawHighlight(this._selected);
+        } else if (this._tab === 'physics') {
+            const entity = this._bodyList.selected;
+            if (entity) {
+                this._wire.color.copy(this._highlightColor);
+                this._wire.depthTest = false;
+                const jointDrawn = drawJoint(this._wire, entity, this._highlightSize(entity));
+                const shapeDrawn = drawCollisionShape(this._wire, entity);
+                if (!jointDrawn && !shapeDrawn) this._drawHighlight(entity);
+            }
+        }
+
+        // a hovered texture or render target takes the place of the tab's own preview for as long as
+        // it is hovered
+        const hovered = this._hoveredPreview();
+        if (hovered) {
+            this._drawPreviewQuad(hovered.texture, hovered.label, hovered.depth, hovered.channels, 'corner', hovered.renderTarget);
+        } else if (this._tab === 'targets') {
+            this._drawTargetPreview();
+        } else if (this._tab === 'textures') {
+            this._drawTexturePreview();
+        } else if (this._tab === 'passes') {
+            this._drawPassPreview();
+        }
+
+        // written every frame, as the forward passes it matches are rebuilt every frame
+        if (this._debugFrame) this._applyDebugFrame();
+    }
+
+    /**
+     * Draws the physics world for this frame. Runs from the app's update event, which fires after
+     * the rigid body system has stepped, so the drawn world matches the frame being rendered.
+     *
+     * @private
+     */
+    _drawPhysics() {
+        const physics = this._physics;
+        if (!physics) return;
+
+        // hiding the panel switches the drawing off with it; while disabled the drawer also stops
+        // Bullet from reporting contacts, so nothing accumulates unseen
+        physics.enabled = this._visible && this._drawToggle.checked;
+
+        if (physics.range > 0) {
+            const camera = this._app.systems.camera?.cameras[0];
+            physics.center = camera ? camera.entity.getPosition() : null;
+        }
+        this._pruneHiddenBodies();
+        physics.update();
+    }
+
+    /**
+     * Builds the panel inside a shadow root on a host element appended to the document body.
+     *
+     * @private
+     */
+    _buildDom() {
+        const host = el('div', 'pc-inspector');
+        const shadow = host.attachShadow({ mode: 'open' });
+
+        const style = document.createElement('style');
+        style.textContent = styles;
+
+        const panel = el('div', 'pci-panel');
+
+        // toolbar
+        const toolbar = el('div', 'pci-toolbar');
+        const title = el('span', 'pci-title', 'Inspector');
+        this._pauseBtn = iconButton('pause', 'Pause');
+        this._stepBtn = iconButton('step', 'Step');
+        this._pickBtn = iconButton('pick', 'Pick');
+        this._flyBtn = iconButton('fly', 'Fly');
+        this._orbitBtn = iconButton('orbit', 'Orbit');
+        this._orbitBtn.disabled = true;
+        setTip(this._pickBtn, 'Pick an entity in the view: hover to see it outlined, click to select it. Esc stops');
+        setTip(this._flyBtn, 'Fly the camera of the view with the mouse and WASD, without moving the app\'s own camera. Esc stops');
+        setTip(this._orbitBtn, 'Orbit the camera of the view around the selected entity: drag to orbit, right-drag to pan, the wheel to zoom, without moving the app\'s own camera. Esc stops');
+        this._transformBtns = {
+            translate: iconButton('translate', 'Move'),
+            rotate: iconButton('rotate', 'Rotate'),
+            scale: iconButton('scale', 'Scale')
+        };
+        const transformTips = { translate: 'Move', rotate: 'Rotate', scale: 'Scale' };
+        for (const [mode, button] of Object.entries(this._transformBtns)) {
+            setTip(button, TransformTool.supported ?
+                `${transformTips[mode]} the selected entity with a gizmo in the view: drag its handles. Away from them the app has the view as usual; Pick, Fly and Orbit are off meanwhile. Click again or press Esc to stop` :
+                'The gizmos of this engine cannot be driven by the inspector');
+            button.disabled = !TransformTool.supported;
+            button.addEventListener('click', () => this._setTransformMode(this._transformTool?.mode === mode ? null : /** @type {TransformMode} */ (mode)));
+        }
+        this._popBtn = iconButton('popout', 'Pop out');
+        const closeBtn = iconButton('close', 'Hide');
+        const toggleLabel = Inspector._keyLabel(this._toggleKey);
+        setTip(closeBtn, `Hide the panel${toggleLabel ? `. Press ${toggleLabel} to show it again` : ''}`);
+        toolbar.append(
+            title,
+            this._pauseBtn, this._stepBtn, el('span', 'pci-sep'),
+            this._pickBtn, this._flyBtn, this._orbitBtn, el('span', 'pci-sep'),
+            this._transformBtns.translate, this._transformBtns.rotate, this._transformBtns.scale,
+            el('span', 'pci-spacer'),
+            this._popBtn, closeBtn
+        );
+
+        this._pauseBtn.addEventListener('click', () => {
+            this.paused = !this._paused;
+        });
+        this._stepBtn.addEventListener('click', () => this.step());
+        this._pickBtn.addEventListener('click', () => this._setPicking(this._canvasMode !== 'pick'));
+        this._flyBtn.addEventListener('click', () => this._toggleDrive('fly'));
+        this._orbitBtn.addEventListener('click', () => this._toggleDrive('orbit'));
+        this._popBtn.addEventListener('click', () => {
+            if (this._popup) this._dockBack();
+            else this._popOut();
+        });
+        closeBtn.addEventListener('click', () => {
+            this.visible = false;
+        });
+
+        // body: a tabbed list over the properties, with a draggable splitter
+        const body = el('div', 'pci-body');
+        this._hierarchyEl = el('div', 'pci-hierarchy');
+
+        const tabs = el('div', 'pci-tabs');
+        this._tabButtons = {};
+        const tabList = [
+            ['hierarchy', 'Hierarchy'], ['cameras', 'Cameras'], ['assets', 'Assets'], ['passes', 'Frame graph'], ['perf', 'Performance'],
+            ['targets', 'Render targets'], ['textures', 'Textures'], ['meshes', 'Meshes'], ['materials', 'Materials'], ['scripts', 'Scripts'], ['memory', 'Memory'],
+            ['shaders', 'Shaders'], ['physics', 'Physics']
+        ];
+        for (const [id, label] of tabList) {
+            const tab = el('button', 'pci-tab', label);
+            setTip(tab, TAB_TIPS[id]);
+            tab.addEventListener('click', () => this._setTab(/** @type {any} */ (id)));
+            tabs.appendChild(tab);
+            this._tabButtons[id] = tab;
+        }
+
+        const filter = el('div', 'pci-filter');
+        this._filterEl = filter;
+        // what the hierarchy filter matches, shown on that tab only: the lists match names
+        this._filterBy = /** @type {HTMLSelectElement} */ (document.createElement('select'));
+        this._filterBy.className = 'pci-select';
+        this._fillSelect(this._filterBy, [['name', 'entity name'], ['component', 'component'], ['script', 'script']]);
+        setTip(this._filterBy, 'What the filter matches in the hierarchy: entity names, the types of their components,\nor the names of their scripts');
+        this._filterInput = /** @type {HTMLInputElement} */ (document.createElement('input'));
+        this._filterInput.placeholder = 'Filter by name…';
+        setTip(this._filterInput, 'Show only the items of this tab whose name contains the text');
+        this._filterInput.spellcheck = false;
+        // the component types or script names in the scene, offered while filtering by them
+        this._filterSuggestions = /** @type {HTMLDataListElement} */ (document.createElement('datalist'));
+        this._filterSuggestions.id = 'pci-filter-suggestions';
+        this._filterInput.setAttribute('list', this._filterSuggestions.id);
+        filter.append(this._filterBy, this._filterInput, this._filterSuggestions);
+
+        const tree = el('div', 'pci-tree');
+
+        const passPanel = el('div', 'pci-listpanel');
+        const passBar = el('div', 'pci-subbar');
+        this._gpuToggle = this._makeToggle(passBar, 'GPU timings',
+            'Enable the GPU profiler and show the time each pass takes on the GPU. Measuring adds a little overhead');
+        this._freezeToggle = this._makeToggle(passBar, 'Freeze',
+            'Keep showing the frame captured now while the app runs on, to read it at leisure. Pause stops the app itself');
+        this._passPreviewToggle = this._makeToggle(passBar, 'Preview',
+            'Draw the selected pass\'s render target over the free part of the viewport');
+        this._passPreviewToggle.checked = true;
+        this._debugFrameToggle = this._makeToggle(passBar, 'Debug frame',
+            'Pause and draw the selected forward pass only up to a chosen draw, stepping with the arrow keys');
+        if (!this._app.renderer?.debugDrawLimitSupported) {
+            this._debugFrameToggle.disabled = true;
+            setTip(this._debugFrameToggle.parentElement, 'Stepping through draws needs the debug engine');
+        }
+        this._passNote = el('div', 'pci-note pci-note-info');
+        this._passNote.style.display = 'none';
+        const passList = el('div', 'pci-list');
+        passPanel.append(passBar, this._passNote, passList);
+
+        // performance: recording controls, the charts of the capture and the timeline of a frame
+        const perfPanel = el('div', 'pci-listpanel');
+        const perfBar = el('div', 'pci-subbar pci-wrap');
+        const button = (parent, text, tip, run) => {
+            const b = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', text));
+            setTip(b, tip);
+            b.addEventListener('click', run);
+            parent.appendChild(b);
+            return b;
+        };
+        const recordGroup = el('span', 'pci-group');
+        this._perfRecordBtn = iconButton('record', 'Record');
+        this._perfRecordBtn.classList.add('pci-small', 'pci-record');
+        this._perfRecordBtn.addEventListener('click', () => this._setRecording(!this._perf.recording));
+        const clearBtn = iconButton('clear', 'Clear');
+        clearBtn.classList.add('pci-small');
+        setTip(clearBtn, 'Clear: forget every frame recorded');
+        clearBtn.addEventListener('click', () => {
+            this._perf.clear();
+            this._perfCharts.reset();
+        });
+        recordGroup.append(this._perfRecordBtn, clearBtn);
+        const frameGroup = el('span', 'pci-group');
+        button(frameGroup, '«', 'Show the first frame kept. The Home key does the same while the panel has focus', () => this._perfCharts.pick(this._perf.first));
+        button(frameGroup, '‹', 'Show the frame before. The left arrow key does the same while the panel has focus; with Shift, ten frames', () => this._perfCharts.step(-1));
+        button(frameGroup, '›', 'Show the frame after. The right arrow key does the same while the panel has focus; with Shift, ten frames', () => this._perfCharts.step(1));
+        this._perfLastBtn = button(frameGroup, '»', 'Show the newest frame, and keep showing it as frames are recorded. The End key does the same while the panel has focus', () => this._perfCharts.follow());
+        perfBar.append(recordGroup, frameGroup);
+        this._perfGpuToggle = this._makeToggle(perfBar, 'GPU timings',
+            'Enable the GPU profiler and record the time each frame and each pass take on the GPU. Measuring adds a little overhead');
+        this._perfInspectorToggle = this._makeToggle(perfBar, 'Inspector time',
+            'Include the inspector\'s own time in the CPU chart. It runs inside the app\'s update; leave it out to scale the chart\nto the app\'s own time. The frame details list it either way');
+        this._perfInspectorToggle.checked = true;
+        this._perfScriptsToggle = this._makeToggle(perfBar, 'Script timing',
+            'Time each script type\'s update, post-update and initialize while recording. Timing a call costs the app about half a\nmicrosecond, counted as the inspector\'s time. Time spent in event handlers, timers and promises is not counted');
+        this._perfScriptsToggle.addEventListener('change', () => this._setScriptTiming(this._perfScriptsToggle.checked));
+        if (!this._perf.supports.scripts) {
+            this._perfScriptsToggle.disabled = true;
+            setTip(this._perfScriptsToggle.parentElement, 'This app has no script system');
+        }
+        this._perfNote = el('div', 'pci-note pci-note-info');
+        this._perfNote.style.display = 'none';
+        perfPanel.append(perfBar, this._perfNote);
+        this._perfCharts = new PerfCharts(perfPanel, this._perf);
+        setTip(this._perfCharts.timelineElement, 'The frame shown, along its own time. The GPU passes are drawn back to back,\nas the GPU says how long each took but not when it ran');
+        this._perfCharts.onChange = () => this._onPerfChange();
+        this._perfCharts.onSelectScript = (id) => {
+            const cls = this._perf.scriptClasses[id];
+            if (cls) this._selectAny(cls);
+        };
+        this._perfCharts.onSelectPass = pass => this._showPass(pass);
+        this._perfCharts.onSelectAsset = (id) => {
+            const asset = this._app.assets.get(id);
+            if (asset) this._selectAny(asset);
+        };
+        this._perfCharts.onCollapse = () => this._saveSettings();
+        this._perfInspectorToggle.addEventListener('change', () => {
+            this._perfCharts.showInspector = this._perfInspectorToggle.checked;
+            this._perfCharts.invalidate();
+            this._saveSettings();
+        });
+
+        // render targets: a live preview of the selected target, drawn over the canvas
+        const targetPanel = el('div', 'pci-listpanel');
+        const targetBar = el('div', 'pci-subbar');
+        this._previewToggle = this._makeToggle(targetBar, 'Preview',
+            'Draw the selected target\'s texture in the corner of the viewport, sampled on the GPU every frame');
+        this._previewToggle.checked = true;
+        this._previewAttachment = this._makeSelect(targetBar, 'Attachment', [['color0', 'color']],
+            'Which texture of the render target to preview');
+        this._previewChannels = this._makeSelect(targetBar, 'Channels', [
+            ['rgb', 'color'], ['rrr', 'red'], ['ggg', 'green'], ['bbb', 'blue'], ['aaa', 'alpha']
+        ], CHANNELS_TIP);
+        this._previewNote = el('div', 'pci-note pci-note-info');
+        this._previewNote.style.display = 'none';
+        const targetList = el('div', 'pci-list');
+        targetPanel.append(targetBar, this._previewNote, targetList);
+
+        // textures: the same live preview for the selected texture
+        const texturePanel = el('div', 'pci-listpanel');
+        const textureBar = el('div', 'pci-subbar');
+        this._texturePreviewToggle = this._makeToggle(textureBar, 'Preview',
+            'Draw the selected texture in the corner of the viewport, sampled on the GPU every frame');
+        this._texturePreviewToggle.checked = true;
+        this._textureChannels = this._makeSelect(textureBar, 'Channels', [
+            ['rgb', 'color'], ['rrr', 'red'], ['ggg', 'green'], ['bbb', 'blue'], ['aaa', 'alpha']
+        ], CHANNELS_TIP);
+        this._textureNote = el('div', 'pci-note pci-note-info');
+        this._textureNote.style.display = 'none';
+        const textureList = el('div', 'pci-list');
+        texturePanel.append(textureBar, this._textureNote, textureList);
+
+        // assets: the registry, in a chosen order
+        const assetPanel = el('div', 'pci-listpanel');
+        const assetBar = el('div', 'pci-subbar');
+        this._assetSort = this._makeSelect(assetBar, 'Sort by', ASSET_SORTS, 'The order of the asset list');
+        const assetList = el('div', 'pci-list');
+        assetPanel.append(assetBar, assetList);
+
+        // meshes: a note when some vertex buffers belong to no mesh found, over the list
+        const meshPanel = el('div', 'pci-listpanel');
+        this._meshNote = el('div', 'pci-note pci-note-info');
+        this._meshNote.style.display = 'none';
+        const meshList = el('div', 'pci-list');
+        meshPanel.append(this._meshNote, meshList);
+
+        // materials: a plain list
+        const materialPanel = el('div', 'pci-listpanel');
+        const materialList = el('div', 'pci-list');
+        materialPanel.append(materialList);
+
+        // cameras: the render mode and wireframe over the list
+        const cameraPanel = el('div', 'pci-listpanel');
+        const cameraBar = el('div', 'pci-subbar');
+        this._renderMode = this._makeSelect(cameraBar, 'Render', RENDER_MODES,
+            'Draw with the lit scene, or a debug view of one input of the materials');
+        this._renderScope = this._makeSelect(cameraBar, 'for', [['all', 'all cameras']],
+            'The camera to switch the render mode of, or all of them');
+        this._wireframeToggle = this._makeToggle(cameraBar, 'Wireframe', 'Draw every mesh instance of the scene in wireframe, for every camera');
+        this._resetViewBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-btn', 'Reset'));
+        setTip(this._resetViewBtn, 'Put back the render mode each camera had, and turn wireframe off');
+        this._resetViewBtn.disabled = true;
+        this._resetViewBtn.addEventListener('click', () => this._resetRenderOverrides());
+        cameraBar.appendChild(this._resetViewBtn);
+        const cameraList = el('div', 'pci-list');
+        cameraPanel.append(cameraBar, cameraList);
+        this._renderMode.addEventListener('change', () => this._applyRenderMode());
+        // choosing a camera shows its render mode, and changes nothing until a mode is picked
+        this._renderScope.addEventListener('change', () => {
+            const camera = this._scopeCamera();
+            if (camera) this._renderMode.value = camera.camera.shaderPassInfo?.name ?? RENDER_MODES[0][0];
+        });
+        this._wireframeToggle.addEventListener('change', () => this._applyWireframe());
+
+        // scripts: a plain list
+        const scriptPanel = el('div', 'pci-listpanel');
+        const scriptList = el('div', 'pci-list');
+        scriptPanel.append(scriptList);
+
+        // memory: a group per kind of resource, each opening to its buffers
+        const memoryPanel = el('div', 'pci-listpanel');
+        const bufferList = el('div', 'pci-list');
+        memoryPanel.append(bufferList);
+
+        // shaders: a plain list
+        const shaderPanel = el('div', 'pci-listpanel');
+        const shaderList = el('div', 'pci-list');
+        shaderPanel.append(shaderList);
+
+        for (const input of [this._previewToggle, this._previewAttachment, this._previewChannels, this._texturePreviewToggle, this._textureChannels, this._assetSort]) {
+            input.addEventListener('change', () => this._saveSettings());
+        }
+
+        // physics: a master switch, the options it governs, then the list of bodies
+        const physicsPanel = el('div', 'pci-listpanel');
+        const physicsMaster = el('div', 'pci-subbar pci-master');
+        this._drawToggle = this._makeToggle(physicsMaster, 'Draw physics world',
+            'Draw the physics world over the scene through the engine\'s debug drawer. The options below only apply while this is on');
+        this._drawToggle.parentElement.classList.add('pci-strong');
+        physicsMaster.appendChild(el('span', 'pci-hint', 'options below apply while on'));
+        const physicsBar = el('div', 'pci-subbar pci-wrap pci-options');
+        this._physicsOptionsBar = physicsBar;
+        const options = [
+            ['wireframe', 'Wireframe', 'Collision shapes. White: awake, green: asleep, cyan: about to sleep, red: never sleeps, yellow: not simulated'],
+            ['aabb', 'AABB', 'Axis-aligned bounds of each body'],
+            ['contacts', 'Contacts', 'Contact points and normals from the last step'],
+            ['constraints', 'Constraints', 'Joint frames'],
+            ['limits', 'Limits', 'Joint limits'],
+            ['normals', 'Normals', 'Face normals of mesh shapes'],
+            ['frames', 'Frames', 'Local axes of each body'],
+            ['keepAwake', 'Keep awake', 'Stop bodies from falling asleep while drawing']
+        ];
+        this._physicsToggles = {};
+        for (const [key, label, title] of options) {
+            const toggle = this._makeToggle(physicsBar, label, title);
+            toggle.addEventListener('change', () => this._applyPhysicsSettings());
+            this._physicsToggles[key] = toggle;
+        }
+        this._depthToggle = this._makeToggle(physicsBar, 'Depth test', 'Hide lines behind geometry');
+        const range = el('label', 'pci-check', 'Range');
+        setTip(range, 'Only draw lines within this distance of the camera, in meters. 0 draws everything');
+        this._rangeInput = /** @type {HTMLInputElement} */ (document.createElement('input'));
+        this._rangeInput.type = 'number';
+        this._rangeInput.className = 'pci-number';
+        this._rangeInput.min = '0';
+        this._rangeInput.step = '1';
+        this._rangeInput.value = '0';
+        range.appendChild(this._rangeInput);
+        physicsBar.appendChild(range);
+        this._physicsNote = el('div', 'pci-note');
+        const bodyList = el('div', 'pci-list');
+        physicsPanel.append(physicsMaster, physicsBar, this._physicsNote, bodyList);
+
+        for (const input of [this._drawToggle, this._depthToggle, this._rangeInput]) {
+            input.addEventListener('change', () => this._applyPhysicsSettings());
+        }
+        this._rangeInput.addEventListener('input', () => this._applyPhysicsSettings());
+
+        this._panels = {
+            hierarchy: tree,
+            assets: assetPanel,
+            passes: passPanel,
+            perf: perfPanel,
+            targets: targetPanel,
+            textures: texturePanel,
+            meshes: meshPanel,
+            materials: materialPanel,
+            scripts: scriptPanel,
+            cameras: cameraPanel,
+            memory: memoryPanel,
+            shaders: shaderPanel,
+            physics: physicsPanel
+        };
+        this._hierarchyEl.append(tabs, filter, tree, cameraPanel, assetPanel, passPanel, perfPanel, targetPanel, texturePanel, meshPanel, materialPanel, scriptPanel, memoryPanel, shaderPanel, physicsPanel);
+
+        const splitter = el('div', 'pci-splitter');
+        const properties = el('div', 'pci-properties');
+        body.append(this._hierarchyEl, splitter, properties);
+
+        this._gpuToggle.addEventListener('change', () => this._setGpuTimings(this._gpuToggle.checked));
+        this._perfGpuToggle.addEventListener('change', () => this._setGpuTimings(this._perfGpuToggle.checked));
+        if (!this._app.graphicsDevice.gpuProfiler) {
+            this._perfGpuToggle.disabled = true;
+            setTip(this._perfGpuToggle.parentElement, 'This device has no GPU profiler');
+        }
+        this._passPreviewToggle.addEventListener('change', () => this._saveSettings());
+        this._debugFrameToggle.addEventListener('change', () => this._setDebugFrame(this._debugFrameToggle.checked));
+        this._freezeToggle.addEventListener('change', () => {
+            this._frozen = this._freezeToggle.checked;
+            this._updateStatus();
+        });
+
+        this._filterInput.addEventListener('input', () => this._applyFilter(this._filterInput.value));
+        // the scene may have gained components or scripts since the suggestions were made
+        this._filterInput.addEventListener('focus', () => this._updateFilterHint());
+        this._filterBy.addEventListener('change', () => {
+            this._updateFilterHint();
+            this._applyFilter(this._filterInput.value);
+            this._saveSettings();
+        });
+        this._filterInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                this._filterInput.value = '';
+                this._applyFilter('');
+                this._filterInput.blur();
+            }
+        });
+
+        this._makeDraggable(splitter, (e) => {
+            const rect = body.getBoundingClientRect();
+            const height = Math.max(this._topMinHeight(), Math.min(rect.height - 60, e.clientY - rect.top));
+            this._hierarchyEl.style.flexBasis = `${height}px`;
+        });
+
+        // status bar
+        const status = el('div', 'pci-status');
+        this._countsEl = el('span', 'pci-counts');
+        this._pausedEl = el('span', 'pci-paused');
+        this._debugEl = el('span', 'pci-paused');
+        this._modeEl = el('span', 'pci-paused');
+        this._pathEl = el('span', 'pci-path');
+        // the MCP switch sits here rather than on the toolbar, which has no room left, and shows
+        // while it is on that the app is open to agents
+        this._mcpBtn = /** @type {HTMLButtonElement} */ (el('button', 'pci-mcp', 'MCP'));
+        this._mcpBtn.addEventListener('click', () => {
+            this.mcp = !this._mcp;
+        });
+        status.append(this._countsEl, this._pausedEl, this._debugEl, this._modeEl, this._pathEl, this._mcpBtn);
+
+        // width handle on the inner edge
+        const edge = el('div', 'pci-edge');
+        this._makeDraggable(edge, (e) => {
+            const view = /** @type {Window} */ (edge.ownerDocument.defaultView);
+            this._setWidth(this._dock === 'right' ? view.innerWidth - e.clientX : e.clientX);
+        });
+
+        panel.append(toolbar, body, status, edge);
+        installTooltip(panel);
+        shadow.append(style, panel);
+
+        this._menu?.destroy();
+        this._menu = new ContextMenu(panel);
+        panel.addEventListener('contextmenu', this._onContextMenu);
+
+        // keep the app's input handlers from seeing interaction with the panel
+        for (const type of SWALLOWED_EVENTS) {
+            host.addEventListener(type, (e) => {
+                e.stopPropagation();
+                if (type === 'keydown' && !isTextTarget(e)) {
+                    // the Performance tab steps through frames only while the panel has focus, so
+                    // the arrow keys stay the app's otherwise
+                    const key = /** @type {KeyboardEvent} */ (e);
+                    if (!this._onPerfKey(key)) this._onKeyDown(key);
+                }
+            });
+        }
+
+        document.body.appendChild(host);
+
+        this._host = host;
+        this._panel = panel;
+        this._properties = new PropertyView(properties, target => this._selectAny(target));
+        this._hierarchy = new HierarchyView(tree, (node) => {
+            this._selected = node;
+            if (this._tab === 'hierarchy') this._properties.setSubject(node, buildNodeModel);
+            if (node && this._fly instanceof CameraOrbit) this._fly.setTarget(node);
+            this._transformTool?.attach(node);
+            this._applyViewToolState();
+            this._updateStatus();
+        });
+        this._hierarchy.isLocked = node => this._isLocked(node);
+        this._hierarchy.isHidden = node => node === this._transformTool?.root;
+        this._hierarchy.onToggle = () => this._properties.refresh();
+        this._passList = new ListView(passList, (item, key) => {
+            if (this._tab === 'passes') this._properties.setSubject(item, this._passListModel(item), key);
+            if (this._debugFrame) this._moveDebugFrameTo(item, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._targetList = new ListView(targetList, (rt, key) => {
+            if (this._tab === 'targets') this._properties.setSubject(rt, this._targetModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._textureList = new ListView(textureList, (texture, key) => {
+            if (this._tab === 'textures') this._properties.setSubject(texture, this._textureModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._shaderList = new ListView(shaderList, (shader, key) => {
+            if (this._tab === 'shaders') this._properties.setSubject(shader, this._shaderModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._materialList = new ListView(materialList, (material, key) => {
+            if (this._tab === 'materials') this._properties.setSubject(material, this._materialModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._cameraList = new ListView(cameraList, (camera, key) => {
+            if (this._tab === 'cameras') this._properties.setSubject(camera, this._cameraModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._scriptList = new ListView(scriptList, (cls, key) => {
+            if (this._tab === 'scripts') this._properties.setSubject(cls, this._scriptModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._meshList = new ListView(meshList, (mesh, key) => {
+            if (this._tab === 'meshes') this._properties.setSubject(mesh, this._meshModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._bufferList = new ListView(bufferList, (buffer, key) => {
+            if (this._tab === 'memory') this._properties.setSubject(buffer, this._bufferModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._assetList = new ListView(assetList, (asset, key) => {
+            if (this._tab === 'assets') this._properties.setSubject(asset, this._assetModel, key);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._bodyList = new ListView(bodyList, (entity) => {
+            if (this._tab === 'physics') this._properties.setSubject(entity, buildNodeModel);
+            this._updateStatus();
+        }, target => this._selectAny(target));
+        this._bodyList.onToggle = (entity, drawn) => this._setBodyDrawn(entity, drawn);
+
+        // a texture or render target previews while hovered, without having to follow its link
+        const onHover = (el, target) => {
+            this._hoverLink = el && target ? { el, target } : null;
+        };
+        for (const view of [this._properties, ...this._lists()]) view.onHover = onHover;
+    }
+
+    /**
+     * What to preview for the link or row the pointer is over: a texture, or the first attachment of
+     * a render target, the way the Render targets tab shows it. The element is checked to still be on
+     * screen, as a refresh can remove it and a tab switch hide it without the pointer leaving it. The
+     * `:hover` state cannot tell instead: browsers do not reliably report it for elements in a shadow
+     * root.
+     *
+     * @returns {{ texture: Texture, label: string, depth: boolean, channels: HTMLSelectElement, renderTarget?: RenderTarget }|null}
+     * The texture to draw and how, or null when nothing previewable is hovered.
+     * @private
+     */
+    _hoveredPreview() {
+        const link = this._hoverLink;
+        if (!link) return null;
+        if (!link.el.isConnected || link.el.getClientRects().length === 0) {
+            this._hoverLink = null;
+            return null;
+        }
+        const target = link.target();
+        if (target instanceof Texture) {
+            return { texture: target, label: `Texture "${target.name}"`, depth: isDepthFormat(target.format), channels: this._textureChannels };
+        }
+        if (target instanceof RenderTarget) {
+            const attachment = previewAttachments(target, this._app.graphicsDevice)[0];
+            if (!attachment) return null;
+            return {
+                texture: attachment.texture,
+                label: `the ${attachment.label} of ${target.name || 'its target'}`,
+                depth: attachment.key === 'depth',
+                channels: this._previewChannels,
+                renderTarget: target
+            };
+        }
+        return null;
+    }
+
+    /**
+     * @param {HTMLElement} handle - The element to drag.
+     * @param {(e: PointerEvent) => void} onMove - Called with every pointer move while dragging.
+     * @private
+     */
+    _makeDraggable(handle, onMove) {
+        handle.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            handle.setPointerCapture(e.pointerId);
+            const move = onMove;
+            const up = () => {
+                handle.removeEventListener('pointermove', move);
+                handle.removeEventListener('pointerup', up);
+                handle.removeEventListener('pointercancel', up);
+            };
+            handle.addEventListener('pointermove', move);
+            handle.addEventListener('pointerup', up);
+            handle.addEventListener('pointercancel', up);
+        });
+    }
+
+    /**
+     * @returns {Storage|null} The window's local storage, or null where there is none or reading
+     * it throws, as in some sandboxed frames.
+     * @private
+     */
+    static _storage() {
+        try {
+            return typeof window !== 'undefined' ? window.localStorage ?? null : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Restores the settings kept under {@link InspectorOptions#storageKey}, if any.
+     *
+     * @private
+     */
+    _loadSettings() {
+        if (!this._storageKey) return;
+
+        let stored;
+        try {
+            const json = Inspector._storage()?.getItem(this._storageKey);
+            stored = json ? JSON.parse(json) : null;
+        } catch (e) {
+            // storage unavailable, e.g. a sandboxed frame, or unreadable content
+        }
+        if (!stored || typeof stored !== 'object') return;
+
+        if (stored.physicsDrawOptions && typeof stored.physicsDrawOptions === 'object') {
+            this._physicsDrawOptions = stored.physicsDrawOptions;
+        }
+        if (typeof stored.physicsDraw === 'boolean') this._physicsDraw = stored.physicsDraw;
+        if (Array.isArray(stored.hiddenBodies)) {
+            this._pendingHiddenPaths = new Set(stored.hiddenBodies.filter(path => typeof path === 'string'));
+        }
+        if (typeof stored.width === 'number') this._setWidth(stored.width);
+        if (typeof stored.passPreview === 'boolean') this._passPreviewToggle.checked = stored.passPreview;
+        if (typeof stored.gpuTimings === 'boolean') this._setGpuTimings(stored.gpuTimings);
+        if (Array.isArray(stored.perfCollapsed)) {
+            this._perfCharts.collapsed = new Set(stored.perfCollapsed.filter(key => typeof key === 'string'));
+        }
+        if (Array.isArray(stored.perfHidden)) {
+            this._perfCharts.hidden = new Set(stored.perfHidden.filter(key => typeof key === 'string'));
+        }
+        if (typeof stored.perfInspector === 'boolean') {
+            this._perfInspectorToggle.checked = stored.perfInspector;
+            this._perfCharts.showInspector = stored.perfInspector;
+        }
+        if (typeof stored.perfScripts === 'boolean') this._setScriptTiming(stored.perfScripts);
+        if (Number.isInteger(stored.perfScriptRows) && stored.perfScriptRows > 0) this._perfCharts.scriptRows = stored.perfScriptRows;
+        if (Number.isFinite(stored.perfGutter)) this._perfCharts.gutter = stored.perfGutter;
+        if (Array.isArray(stored.perfPinned)) {
+            this._perfCharts.pinned = new Set(stored.perfPinned.filter(name => typeof name === 'string'));
+        }
+        if (stored.targetPreview && typeof stored.targetPreview === 'object') {
+            if (typeof stored.targetPreview.enabled === 'boolean') this._previewToggle.checked = stored.targetPreview.enabled;
+            if (typeof stored.targetPreview.channels === 'string') this._previewChannels.value = stored.targetPreview.channels;
+        }
+        if (typeof stored.assetSort === 'string') this._assetSort.value = stored.assetSort;
+        if (typeof stored.copyDepth === 'number') this._setCopyDepth(stored.copyDepth);
+        if (typeof stored.mcp === 'boolean') this._mcp = stored.mcp;
+        if (typeof stored.filterBy === 'string') {
+            this._filterBy.value = stored.filterBy;
+            this._hierarchy.filterBy = /** @type {any} */ (this._filterBy.value);
+        }
+        if (stored.texturePreview && typeof stored.texturePreview === 'object') {
+            if (typeof stored.texturePreview.enabled === 'boolean') this._texturePreviewToggle.checked = stored.texturePreview.enabled;
+            if (typeof stored.texturePreview.channels === 'string') this._textureChannels.value = stored.texturePreview.channels;
+        }
+        if (stored.tab in this._panels) this._setTab(stored.tab);
+    }
+
+    /**
+     * Writes the settings kept under {@link InspectorOptions#storageKey}, if any. Called whenever
+     * one of them changes; suppressed while the panel is being built and restored.
+     *
+     * @private
+     */
+    _saveSettings() {
+        if (!this._storageKey || this._restoring || !this._host) return;
+
+        const hiddenBodies = [...this._pendingHiddenPaths];
+        for (const entity of this._hiddenBodies.keys()) {
+            hiddenBodies.push(entity.path);
+        }
+
+        try {
+            Inspector._storage()?.setItem(this._storageKey, JSON.stringify({
+                physicsDraw: this._physicsDraw,
+                physicsDrawOptions: this._physicsDrawOptions,
+                hiddenBodies,
+                tab: this._tab,
+                width: this._width,
+                gpuTimings: this._gpuToggle.checked,
+                perfInspector: this._perfInspectorToggle.checked,
+                perfScripts: this._perfScriptsToggle.checked,
+                perfScriptRows: this._perfCharts.scriptRows,
+                perfGutter: this._perfCharts.gutter,
+                perfPinned: [...this._perfCharts.pinned],
+                perfCollapsed: [...this._perfCharts.collapsed],
+                perfHidden: [...this._perfCharts.hidden],
+                passPreview: this._passPreviewToggle.checked,
+                targetPreview: { enabled: this._previewToggle.checked, channels: this._previewChannels.value },
+                texturePreview: { enabled: this._texturePreviewToggle.checked, channels: this._textureChannels.value },
+                assetSort: this._assetSort.value,
+                filterBy: this._filterBy.value,
+                copyDepth: this._copyDepth,
+                mcp: this._mcp
+            }));
+        } catch (e) {
+            // storage unavailable or full: settings simply do not persist
+        }
+    }
+
+    /**
+     * Includes or excludes one body from the physics drawing, from its checkbox in the list.
+     *
+     * @param {Entity} entity - The entity carrying the rigid body.
+     * @param {boolean} drawn - Whether the body is drawn.
+     * @private
+     */
+    _setBodyDrawn(entity, drawn) {
+        const physics = this._physics;
+        if (drawn) {
+            const body = this._hiddenBodies.get(entity);
+            this._hiddenBodies.delete(entity);
+            if (body && physics) physics.showBody(body);
+        } else {
+            const body = entity.rigidbody?.body ?? null;
+            this._hiddenBodies.set(entity, body);
+            if (body && physics) physics.hideBody(body);
+        }
+        if (this._tab === 'physics') this._refreshLists(false);
+        this._saveSettings();
+    }
+
+    /**
+     * Keeps the exclusions in step with the engine: a body the engine rebuilt is excluded again, a
+     * destroyed one is forgotten without being touched, and an entity that lost its component
+     * drops out.
+     *
+     * @private
+     */
+    _pruneHiddenBodies() {
+        const physics = this._physics;
+
+        // exclusions restored from storage attach to the entities once they exist
+        if (this._pendingHiddenPaths.size) {
+            const store = this._app.systems.rigidbody?.store;
+            for (const record of Object.values(store ?? {})) {
+                const entity = record.entity;
+                if (this._pendingHiddenPaths.delete(entity.path)) {
+                    const body = entity.rigidbody?.body ?? null;
+                    this._hiddenBodies.set(entity, body);
+                    if (body && physics) physics.hideBody(body);
+                }
+            }
+        }
+
+        for (const [entity, body] of this._hiddenBodies) {
+            const rigidbody = entity.rigidbody;
+            const current = rigidbody?.body ?? null;
+            if (current === body) continue;
+            if (body && physics) physics.forgetBody(body);
+            if (!rigidbody) {
+                this._hiddenBodies.delete(entity);
+            } else {
+                this._hiddenBodies.set(entity, current);
+                if (current && physics) physics.hideBody(current);
+            }
+        }
+    }
+
+    /**
+     * Pushes the physics tab's controls into the debug drawer.
+     *
+     * @private
+     */
+    _applyPhysicsSettings() {
+        const physics = this._physics;
+        if (!physics) return;
+
+        let mode = 0;
+        for (const [key, flag] of Object.entries(PHYSICS_FLAGS)) {
+            if (this._physicsToggles[key].checked) mode |= flag;
+        }
+
+        const draw = this._drawToggle.checked;
+        physics.enabled = this._visible && draw;
+        physics.mode = mode;
+        physics.depthTest = this._depthToggle.checked;
+        physics.range = Math.max(0, parseFloat(this._rangeInput.value) || 0);
+
+        // the options and the per-body checkboxes mean nothing while the master switch is off
+        this._physicsOptionsBar.classList.toggle('pci-inactive', !draw);
+        for (const input of this._physicsOptionsBar.querySelectorAll('input')) {
+            input.disabled = !draw;
+        }
+        if (this._tab === 'physics') this._refreshLists(false);
+        this._saveSettings();
+    }
+
+    /**
+     * @param {HTMLElement} parent - The bar to add the selector to.
+     * @param {string} label - The label.
+     * @param {[string, string][]} options - Value and label pairs.
+     * @param {string} title - The tooltip.
+     * @returns {HTMLSelectElement} The selector.
+     * @private
+     */
+    _makeSelect(parent, label, options, title) {
+        const wrap = el('label', 'pci-check', label);
+        setTip(wrap, title);
+        const select = /** @type {HTMLSelectElement} */ (document.createElement('select'));
+        select.className = 'pci-select';
+        this._fillSelect(select, options);
+        wrap.appendChild(select);
+        parent.appendChild(wrap);
+        return select;
+    }
+
+    /**
+     * @param {HTMLSelectElement} select - The selector.
+     * @param {[string, string][]} options - Value and label pairs.
+     * @private
+     */
+    _fillSelect(select, options) {
+        const previous = select.value;
+        select.textContent = '';
+        for (const [value, label] of options) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            select.appendChild(option);
+        }
+        if (options.some(([value]) => value === previous)) select.value = previous;
+    }
+
+    /**
+     * Draws the selected render target's texture in the free corner of the viewport, on the UI
+     * layer: it renders after a camera frame's post-processing and into the backbuffer, so
+     * previewing the scene's own color target never samples a texture being rendered to. Runs
+     * every frame while the Render targets tab is active; the renderer only shows what is
+     * submitted that frame.
+     *
+     * @private
+     */
+    _drawTargetPreview() {
+        const rt = this._targetList.selected;
+        const device = this._app.graphicsDevice;
+        let note = '';
+
+        if (rt && this._previewToggle.checked) {
+            const attachments = previewAttachments(rt, device);
+            const keys = attachments.map(a => a.key).join(',');
+            if (keys !== this._previewKeys) {
+                this._previewKeys = keys;
+                this._fillSelect(this._previewAttachment, attachments.map(a => [a.key, a.label]));
+            }
+            const attachment = attachments.find(a => a.key === this._previewAttachment.value) ?? attachments[0];
+
+            if (!attachment) {
+                note = rt === device.backBuffer ? 'The backbuffer is the screen itself, there is nothing to preview.' : 'This target has no texture to preview.';
+            } else {
+                note = this._drawPreviewQuad(attachment.texture, `the ${attachment.label} attachment`, attachment.key === 'depth', this._previewChannels, 'corner', rt);
+            }
+        }
+
+        Inspector._setNote(this._previewNote, note);
+    }
+
+    /**
+     * Draws the texture selected on the textures tab, when its preview is enabled. Runs every frame
+     * while the tab is active.
+     *
+     * @private
+     */
+    _drawTexturePreview() {
+        const texture = this._textureList.selected;
+        let note = '';
+        if (texture && this._texturePreviewToggle.checked) {
+            note = this._drawPreviewQuad(texture, `Texture "${texture.name}"`, isDepthFormat(texture.format), this._textureChannels);
+        }
+        Inspector._setNote(this._textureNote, note);
+    }
+
+    /**
+     * Draws a texture keeping its aspect, either at 30% of the viewport height in the corner the
+     * panel leaves free, or as large as fits the part of the viewport the panel leaves free. The
+     * quad goes on the UI layer, drawn by the last camera rendering that layer to the screen:
+     * cameras rendering into a texture would put the quad in their target, and the UI layer
+     * renders after a camera frame's post-processing, so previewing the scene's own color target
+     * never samples a texture being rendered to.
+     *
+     * @param {Texture} texture - The texture.
+     * @param {string} label - What is being previewed, for the note.
+     * @param {boolean} depth - Whether it is a raw depth texture, which the channel selection
+     * does not apply to.
+     * @param {HTMLSelectElement|null} channelsSelect - The channel selection to apply, or null for
+     * color.
+     * @param {'corner'|'large'} [size] - Where and how large to draw it. Defaults to the corner.
+     * @param {RenderTarget|null} [renderTarget] - The render target the texture is attached to,
+     * which decides whether it is stored upside down. Looked up on the device when not given.
+     * @returns {string} What is shown where, or why nothing is.
+     * @private
+     */
+    _drawPreviewQuad(texture, label, depth, channelsSelect, size = 'corner', renderTarget) {
+        const device = this._app.graphicsDevice;
+        const uiLayer = this._app.scene?.layers?.getLayerById(LAYERID_UI) ?? null;
+        const cameras = uiLayer ? this._app.systems.camera?.cameras ?? [] : [];
+        const uiCamera = cameras.filter(camera => !camera.renderTarget && camera.layers.includes(LAYERID_UI)).at(-1) ?? null;
+        if (!uiCamera) return 'The preview is drawn on the UI layer, which no camera renders to the screen in this scene.';
+
+        const support = previewSupport(texture, device);
+        if (!support.ok) return `Cannot preview ${label}: ${support.reason}.`;
+
+        const right = this._dock === 'left' || !!this._popup;
+        let rect;
+        if (size === 'large') {
+            rect = this._freePreviewRect(texture);
+        } else {
+            const margin = 0.02;
+            const height = 0.3;
+            const width = texture.height > 0 && device.width > 0 ?
+                height * (texture.width / texture.height) * (device.height / device.width) : height;
+            rect = { x: right ? 1 - width - margin : margin, y: 1 - height - margin, width, height };
+        }
+
+        // a channel the format does not store samples as a constant, so show the color instead and say why
+        const selected = channelsSelect?.value ?? 'rgb';
+        const selectedLabel = channelsSelect?.selectedOptions[0]?.textContent ?? 'color';
+        const stored = depth ? '' : formatChannels(texture.format);
+        const missing = selected !== 'rgb' && stored !== '' && !stored.includes(selected[0]);
+
+        this._textures.layer = uiLayer;
+        this._textures.camera = uiCamera;
+        this._textures.channels = missing ? 'rgb' : selected;
+        // a negative height draws the rows from the bottom edge up, turning a bottom-up image upright
+        if (storedBottomUp(texture, device, renderTarget)) {
+            this._textures.draw(texture, rect.x, rect.y + rect.height, rect.width, -rect.height);
+        } else {
+            this._textures.draw(texture, rect.x, rect.y, rect.width, rect.height);
+        }
+
+        // depth previews are raw grayscale, the channel selection does not apply to them
+        const channels = depth ? '' : ` (${missing ? 'color' : selectedLabel})`;
+        const where = size === 'large' ? 'over the free part of the viewport' : `at the bottom ${right ? 'right' : 'left'} of the viewport`;
+        let note = `Previewing ${label}${channels} ${where}.`;
+        if (missing) note += ` ${formatName(texture.format)} has no ${selectedLabel} channel.`;
+        return note;
+    }
+
+    /**
+     * The largest rectangle of the texture's aspect that fits the part of the viewport the panel
+     * leaves free, in normalized viewport coordinates. The whole viewport is free while the panel
+     * is popped out.
+     *
+     * @param {Texture} texture - The texture to fit.
+     * @returns {{ x: number, y: number, width: number, height: number }} The rectangle.
+     * @private
+     */
+    _freePreviewRect(texture) {
+        const device = this._app.graphicsDevice;
+        const canvasRect = /** @type {any} */ (device).canvas?.getBoundingClientRect?.();
+        let left = 0;
+        let right = 1;
+        if (canvasRect?.width > 0 && !this._popup) {
+            const panelRect = this._panel?.getBoundingClientRect?.();
+            if (panelRect?.width > 0) {
+                if (this._dock === 'left') {
+                    left = Math.min(1, Math.max(0, (panelRect.right - canvasRect.left) / canvasRect.width));
+                } else {
+                    right = Math.max(0, Math.min(1, (panelRect.left - canvasRect.left) / canvasRect.width));
+                }
+            }
+        }
+
+        const margin = 0.02;
+        const freeWidth = Math.max(0.05, right - left - 2 * margin);
+        const freeHeight = 1 - 2 * margin;
+        const textureAspect = texture.height > 0 ? texture.width / texture.height : 1;
+        const viewAspect = device.height > 0 ? device.width / device.height : 1;
+        let height = freeHeight;
+        let width = height * textureAspect / viewAspect;
+        if (width > freeWidth) {
+            width = freeWidth;
+            height = width * viewAspect / textureAspect;
+        }
+        return { x: left + margin + (freeWidth - width) / 2, y: margin + (freeHeight - height) / 2, width, height };
+    }
+
+    /**
+     * Draws the render target of the pass selected on the frame graph tab, large, when its preview
+     * is on. A pass drawing to the screen needs no preview: the view is its output.
+     *
+     * @private
+     */
+    _drawPassPreview() {
+        const item = this._passList.selected;
+        const pass = item instanceof LayerStepSelection ? item.pass : item;
+        const device = this._app.graphicsDevice;
+        let note = '';
+
+        if (pass && this._passPreviewToggle.checked) {
+            const renderTarget = this._frame?.entries.find(entry => entry.pass === pass)?.renderTarget;
+            if (renderTarget === device.backBuffer) {
+                note = 'This pass draws to the screen, which is the view itself.';
+            } else if (renderTarget) {
+                const attachment = previewAttachments(renderTarget, device)[0];
+                note = attachment ?
+                    this._drawPreviewQuad(attachment.texture, `the ${attachment.label} of ${renderTarget.name || 'its target'}`,
+                        attachment.key === 'depth', null, 'large', renderTarget) :
+                    'This pass\'s target has no texture to preview.';
+            }
+        }
+        Inspector._setNote(this._passNote, note);
+    }
+
+    /**
+     * Turns the debug frame on or off. On, it pauses the app, stops the selected forward pass at its
+     * last draw, and takes the arrow keys ahead of the app to step through the draws. Off, the pass
+     * draws in full again and the app returns to its earlier pause state.
+     *
+     * @param {boolean} on - Whether to turn it on.
+     * @private
+     */
+    _setDebugFrame(on) {
+        if (on === !!this._debugFrame) return;
+        const renderer = this._app.renderer;
+        if (on) {
+            if (!renderer?.debugDrawLimitSupported) return;
+            this._debugFrame = { stepKey: null, index: 0, instance: null, wasPaused: this._paused };
+            this.paused = true;
+            this._moveDebugFrameTo(this._passList.selected, this._passList.selectedKey);
+            // ahead of the app's own listeners, which would otherwise move the camera
+            window.addEventListener('keydown', this._onDebugKey, true);
+        } else {
+            const wasPaused = this._debugFrame.wasPaused;
+            this._debugFrame = null;
+            window.removeEventListener('keydown', this._onDebugKey, true);
+            if (renderer) renderer.debugDrawLimit = null;
+            this.paused = wasPaused;
+        }
+        if (this._debugFrameToggle) this._debugFrameToggle.checked = on;
+        this._updateDebugStatus(null);
+        this._properties?.refresh();
+    }
+
+    /**
+     * Moves the debug frame to the last draw of a selected pass or layer step. Selecting anything
+     * else leaves it where it was.
+     *
+     * @param {*} item - What the pass list selected.
+     * @param {string|null} key - The key of its row.
+     * @private
+     */
+    _moveDebugFrameTo(item, key) {
+        const state = this._debugFrame;
+        if (!state || !key) return;
+        const visible = this._frame?.visible;
+        let stepKey = null;
+        let list = null;
+        if (item instanceof LayerStepSelection) {
+            stepKey = key;
+            list = visible?.get(item.step) ?? null;
+        } else if (item instanceof RenderPassForward) {
+            // the last step that drew anything
+            item.layerRenderSteps.forEach((step, i) => {
+                const drawn = visible?.get(step) ?? null;
+                if (drawn?.instances.length) {
+                    stepKey = `${key}/${i}`;
+                    list = drawn;
+                }
+            });
+        }
+        if (!stepKey) return;
+        state.stepKey = stepKey;
+        state.index = Math.max(0, (list?.instances.length ?? 1) - 1);
+        state.instance = list?.instances[state.index] ?? null;
+        this._revealDebugDraw();
+    }
+
+    /**
+     * @param {string} stepKey - The list key of a layer step.
+     * @param {number} index - A draw in its list.
+     * @param {MeshInstance} instance - The instance at that draw.
+     * @private
+     */
+    _chooseDebugDraw(stepKey, index, instance) {
+        const state = this._debugFrame;
+        if (!state) return;
+        state.stepKey = stepKey;
+        state.index = index;
+        state.instance = instance;
+    }
+
+    /**
+     * Finds the layer step the debug frame stops in, in the latest captured frame. Forward passes
+     * are rebuilt every frame, so the step is found again by its list key each time.
+     *
+     * @returns {{ pass: RenderPassForward, step: *, stepIndex: number, passKey: string, list: import('./frame-graph-view.js').VisibleList|null }|null}
+     * The step, or null when it is not in the frame.
+     * @private
+     */
+    _resolveDebugStep() {
+        const stepKey = this._debugFrame?.stepKey;
+        if (!stepKey || !this._frame) return null;
+        const slash = stepKey.lastIndexOf('/');
+        const passKey = stepKey.slice(0, slash);
+        const stepIndex = Number(stepKey.slice(slash + 1));
+        const pass = this._frame.entries.find(entry => entry.key === passKey)?.pass;
+        const step = pass instanceof RenderPassForward ? pass.layerRenderSteps[stepIndex] : undefined;
+        if (!step) return null;
+        return { pass, step, stepIndex, passKey, list: this._frame.visible?.get(step) ?? null };
+    }
+
+    /**
+     * Hands the renderer the limit for this frame: the steps of the pass before the chosen one
+     * draw in full, the chosen one draws up to and including its instance, and the rest draw
+     * nothing, so the pass's target shows exactly what that draw left behind.
+     *
+     * @private
+     */
+    _applyDebugFrame() {
+        const renderer = this._app.renderer;
+        const state = this._debugFrame;
+        const found = this._resolveDebugStep();
+        if (!renderer || !state || !found?.list) {
+            if (renderer) renderer.debugDrawLimit = null;
+            this._updateDebugStatus(null);
+            return;
+        }
+
+        // keep the chosen instance where the latest list put it
+        const instances = found.list.instances;
+        const at = state.instance ? instances.indexOf(state.instance) : -1;
+        if (at >= 0) state.index = at;
+        state.index = Math.min(Math.max(0, state.index), Math.max(0, instances.length - 1));
+        state.instance = instances[state.index] ?? null;
+
+        const camera = found.step.cameraComponent?.camera;
+        const renderTarget = found.step.renderTarget ?? this._app.graphicsDevice.backBuffer;
+        const layers = new Map();
+        found.pass.layerRenderSteps.forEach((step, i) => {
+            if (step.cameraComponent?.camera !== camera || i < found.stepIndex) return;
+            const entry = layers.get(step.layer) ?? [undefined, undefined];
+            entry[step.transparent ? 1 : 0] = i === found.stepIndex ? { instance: state.instance, index: state.index } : 0;
+            layers.set(step.layer, entry);
+        });
+        renderer.debugDrawLimit = { camera, renderTarget, layers };
+
+        // outline the draw on the UI layer, drawn after a camera frame's scene pass so the limit
+        // does not cut it
+        const aabb = state.instance?.aabb;
+        if (aabb) {
+            const wire = this._wire;
+            const previous = wire.layer;
+            wire.layer = this._app.scene?.layers?.getLayerById(LAYERID_UI) ?? previous;
+            wire.color.copy(this._highlightColor);
+            wire.depthTest = false;
+            wire.box(aabb);
+            wire.layer = previous;
+        }
+        this._updateDebugStatus(found);
+    }
+
+    /**
+     * Steps the debug frame one draw on or back, carrying on into the neighboring steps of the same
+     * camera in the pass, and skipping those that drew nothing.
+     *
+     * @param {number} delta - 1 for the next draw, -1 for the previous.
+     * @private
+     */
+    _stepDebugDraw(delta) {
+        const state = this._debugFrame;
+        const found = this._resolveDebugStep();
+        if (!state || !found?.list) return;
+        const steps = found.pass.layerRenderSteps;
+        const camera = found.step.cameraComponent?.camera;
+        const listOf = i => (steps[i].cameraComponent?.camera === camera ? this._frame?.visible?.get(steps[i]) ?? null : null);
+
+        let stepIndex = found.stepIndex;
+        let index = state.index + delta;
+        if (index >= found.list.instances.length) {
+            index = found.list.instances.length - 1;
+            for (let i = stepIndex + 1; i < steps.length; i++) {
+                if (listOf(i)?.instances.length) {
+                    stepIndex = i;
+                    index = 0;
+                    break;
+                }
+            }
+        } else if (index < 0) {
+            index = 0;
+            for (let i = stepIndex - 1; i >= 0; i--) {
+                const list = listOf(i);
+                if (list?.instances.length) {
+                    stepIndex = i;
+                    index = list.instances.length - 1;
+                    break;
+                }
+            }
+        }
+
+        const stepKey = `${found.passKey}/${stepIndex}`;
+        // follow into a new step in the list when a step, rather than the whole pass, is shown
+        if (stepKey !== state.stepKey && this._passList.selected instanceof LayerStepSelection) {
+            this._passList.select(stepKey);
+        }
+        state.stepKey = stepKey;
+        state.index = index;
+        state.instance = listOf(stepIndex)?.instances[index] ?? null;
+        this._revealDebugDraw();
+    }
+
+    /**
+     * Brings the draw the debug frame stops at into view: its page, and its row.
+     *
+     * @private
+     */
+    _revealDebugDraw() {
+        const state = this._debugFrame;
+        if (!state?.stepKey) return;
+        this._instancePages.set(state.stepKey, Math.floor(state.index / INSTANCES_PER_PAGE));
+        this._properties.refresh();
+        this._properties.container.querySelector('.pci-prop.pci-active')?.scrollIntoView?.({ block: 'nearest' });
+    }
+
+    /**
+     * Takes the arrow keys while the debug frame is on, ahead of the app, unless typing in a field.
+     *
+     * @param {KeyboardEvent} e - The event.
+     * @returns {boolean} Whether the key stepped the frame.
+     * @private
+     */
+    _onDebugKey = (e) => {
+        if (!this._debugFrame || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return false;
+        // events from inside the panel's shadow root reach the window retargeted to its host
+        const target = /** @type {any} */ (e.composedPath?.()[0] ?? e.target);
+        if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target?.tagName)) return false;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        this._stepDebugDraw(e.key === 'ArrowDown' ? 1 : -1);
+        return true;
+    };
+
+    /**
+     * @param {{ step: *, list: import('./frame-graph-view.js').VisibleList|null }|null} found - The
+     * step the debug frame stops in, or null.
+     * @private
+     */
+    _updateDebugStatus(found) {
+        const state = this._debugFrame;
+        let text = '';
+        if (state) {
+            text = found?.list ?
+                `DEBUG FRAME · draw ${state.index} of ${found.list.instances.length} · ${found.step.layer.name} ${found.step.transparent ? 'transparent' : 'opaque'}` :
+                'DEBUG FRAME · select a forward pass';
+        }
+        if (this._debugEl && this._debugEl.textContent !== text) this._debugEl.textContent = text;
+    }
+
+    /**
+     * Words the filter box after what it matches on the active tab, and fills its suggestions with
+     * the component types or script names of the scene while the hierarchy is filtered by those.
+     *
+     * @private
+     */
+    _updateFilterHint() {
+        const by = this._tab === 'hierarchy' ? this._filterBy.value : 'name';
+        this._filterInput.placeholder = by === 'component' ? 'Filter by component…' :
+            by === 'script' ? 'Filter by script…' : this._tab === 'hierarchy' ? 'Filter by entity name…' : 'Filter by name…';
+
+        const values = filterSuggestions(this._app.root ?? null, /** @type {any} */ (by));
+        const options = this._filterSuggestions.options;
+        if (options.length === values.length && values.every((value, i) => options[i].value === value)) return;
+        this._filterSuggestions.replaceChildren(...values.map((value) => {
+            const option = document.createElement('option');
+            option.value = value;
+            return option;
+        }));
+    }
+
+    /**
+     * @param {HTMLElement} element - A note element.
+     * @param {string} text - The text, empty to hide the note.
+     * @private
+     */
+    static _setNote(element, text) {
+        if (element.textContent !== text) element.textContent = text;
+        const display = text ? '' : 'none';
+        if (element.style.display !== display) element.style.display = display;
+    }
+
+    /**
+     * @param {HTMLElement} parent - The bar to add the toggle to.
+     * @param {string} label - The label.
+     * @param {string} title - The tooltip.
+     * @returns {HTMLInputElement} The checkbox.
+     * @private
+     */
+    _makeToggle(parent, label, title) {
+        const wrap = el('label', 'pci-check', label);
+        setTip(wrap, title);
+        const input = /** @type {HTMLInputElement} */ (document.createElement('input'));
+        input.type = 'checkbox';
+        wrap.prepend(input);
+        parent.appendChild(wrap);
+        return input;
+    }
+
+    /**
+     * @returns {number} The least height of the part above the splitter. The Performance tab keeps
+     * room for what does not shrink, its controls and its timeline, and a little of its charts,
+     * which scroll; less would spill over the splitter.
+     * @private
+     */
+    _topMinHeight() {
+        if (this._tab !== 'perf') return MIN_TOP_HEIGHT;
+        // the content as laid out, spilling or not, less what the charts take beyond their least
+        const charts = this._perfCharts.chartsElement;
+        return Math.max(MIN_TOP_HEIGHT, Math.ceil(this._hierarchyEl.scrollHeight - charts.offsetHeight + MIN_PERF_CHARTS_HEIGHT));
+    }
+
+    /**
+     * Raises the part above the splitter to the least height of the tab now shown, where it was
+     * dragged lower on another tab.
+     *
+     * @private
+     */
+    _fitTop() {
+        const basis = parseFloat(this._hierarchyEl.style.flexBasis);
+        if (!(basis > 0)) return;
+        const least = this._topMinHeight();
+        if (basis < least) this._hierarchyEl.style.flexBasis = `${least}px`;
+    }
+
+    /**
+     * Turns the GPU profiler on or off, from either of the switches, which follow each other.
+     *
+     * @param {boolean} on - Whether to time the GPU.
+     * @private
+     */
+    _setGpuTimings(on) {
+        const profiler = this._app.graphicsDevice.gpuProfiler;
+        if (profiler) profiler.enabled = on;
+        this._gpuToggle.checked = on;
+        this._perfGpuToggle.checked = on;
+        this._saveSettings();
+        if (this._tab === 'perf') this._refreshLists(false);
+    }
+
+    /**
+     * Turns the timing of scripts on or off, which takes effect right away while recording.
+     *
+     * @param {boolean} on - Whether to time each script type.
+     * @private
+     */
+    _setScriptTiming(on) {
+        on &&= this._perf.supports.scripts;
+        this._perf.timeScripts = on;
+        this._perfScriptsToggle.checked = on;
+        this._perfCharts.invalidate();
+        this._saveSettings();
+        if (this._tab === 'perf') this._refreshLists(false);
+    }
+
+    /**
+     * Starts or stops recording frames for the Performance tab.
+     *
+     * @param {boolean} on - Whether to record.
+     * @private
+     */
+    _setRecording(on) {
+        // a capture started other than by the tools is the user's, which the tools do not clear
+        // unasked; the tools mark their own once started
+        if (on && !this._perf.recording) this._mcpHost.perf.byAgent = false;
+        if (on) this._perf.start();
+        else this._perf.stop();
+        this._perfCharts.invalidate();
+        // the Record button shows it on whichever tab is open, as code can start a capture too
+        this._updatePerfBar();
+        this._refreshLists(false);
+    }
+
+    /**
+     * The frame shown or the frames selected on the Performance tab changed.
+     *
+     * @private
+     */
+    _onPerfChange() {
+        if (this._tab !== 'perf') return;
+        this._properties.refresh();
+        this._updatePerfBar();
+        this._updateStatus();
+    }
+
+    /**
+     * Brings the recording controls of the Performance tab and its note up to date.
+     *
+     * @private
+     */
+    _updatePerfBar() {
+        const capture = this._perf;
+        const recording = capture.recording;
+        const record = this._perfRecordBtn;
+        record.classList.toggle('pci-active', recording);
+        record.setAttribute('aria-label', recording ? 'Stop' : 'Record');
+        setTip(record, recording ? 'Stop recording, keeping the frames recorded' :
+            'Record every frame, adding to the capture, which keeps the last 1000');
+        this._perfLastBtn.classList.toggle('pci-active', this._perfCharts.following);
+        const profiler = this._app.graphicsDevice.gpuProfiler;
+        this._perfGpuToggle.checked = !!profiler?.enabled;
+
+        const notes = [];
+        if (!capture.detailed) notes.push('This engine build times the update and the render as a whole: the phases of the render and the breakdown of the draw calls need the profiler or debug engine.');
+        // the frames recorded keep the late timings after recording stops
+        if (profiler?.enabled && (recording || capture.count) && !capture.gpuExact) {
+            notes.push('This engine does not say which frame GPU timings belong to, so they land a few frames late.');
+        }
+        Inspector._setNote(this._perfNote, notes.join(' '));
+    }
+
+    /**
+     * Steps through the frames of the Performance tab with the arrow keys, Shift taking ten at a
+     * time; Home shows the first frame, End follows the newest and Escape unselects the frames
+     * selected together.
+     *
+     * @param {KeyboardEvent} e - A key pressed while the panel has focus.
+     * @returns {boolean} Whether the key was used.
+     * @private
+     */
+    _onPerfKey(e) {
+        if (this._tab !== 'perf' || this._debugFrame) return false;
+        const charts = this._perfCharts;
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            charts.step((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 10 : 1));
+        } else if (e.key === 'Home') {
+            charts.pick(this._perf.first);
+        } else if (e.key === 'End') {
+            charts.follow();
+        } else if (e.key === 'Escape' && charts.range) {
+            charts.clearRange();
+        } else {
+            return false;
+        }
+        e.preventDefault();
+        return true;
+    }
+
+    /**
+     * Switches the list tab and points the property view at that tab's selection.
+     *
+     * @param {'hierarchy'|'cameras'|'assets'|'passes'|'perf'|'targets'|'textures'|'meshes'|'materials'|'scripts'|'memory'|'shaders'|'physics'} tab - The tab.
+     * @private
+     */
+    _setTab(tab) {
+        this._tab = tab;
+        this._menu?.hide();
+        this._filterBy.style.display = tab === 'hierarchy' ? '' : 'none';
+        // the Performance tab has no list to filter
+        this._filterEl.style.display = tab === 'perf' ? 'none' : '';
+        this._hierarchyEl.classList.toggle('pci-tall', tab === 'perf');
+        if (tab === 'perf') this._perfCharts.invalidate();
+        this._updateFilterHint();
+        for (const [id, button] of Object.entries(this._tabButtons)) {
+            button.classList.toggle('pci-active', id === tab);
+        }
+        for (const [id, panel] of Object.entries(this._panels)) {
+            panel.style.display = id === tab ? '' : 'none';
+        }
+        // measured with the tab's panel shown
+        if (tab === 'perf') this._fitTop();
+        this._refreshLists(false);
+        if (tab === 'hierarchy') {
+            this._properties.setSubject(this._hierarchy.selected, buildNodeModel);
+        }
+        this._updateStatus();
+        this._saveSettings();
+    }
+
+    /**
+     * Refreshes the active list. The frame graph is re-captured only when asked and not frozen, so
+     * switching tabs keeps the frame the links were built from. Forward passes are recreated every
+     * frame, so the property view is pointed at the current object under the selected row's key.
+     *
+     * @param {boolean} capture - Whether to take a fresh frame snapshot first.
+     * @private
+     */
+    _refreshLists(capture) {
+        const device = this._app.graphicsDevice;
+
+        if (this._tab === 'hierarchy') {
+            this._hierarchy.refresh();
+        } else if (this._tab === 'physics') {
+            const system = this._app.systems.rigidbody;
+            const note = !system ? 'No rigid body component system is registered in this app.' :
+                !system.dynamicsWorld ? 'The physics world has not been created. Is Ammo loaded?' :
+                    !AmmoDebugDraw.isAvailable(this._app) ? 'This Ammo build has no DebugDrawer, so the world cannot be drawn.' : '';
+            this._physicsNote.textContent = note;
+            this._physicsNote.style.display = note ? '' : 'none';
+
+            this._bodyList.setRows([...bodyRows(this._app, this._hiddenBodies, this._drawToggle.checked), ...jointRows(this._app)]);
+            const entity = this._bodyList.selected;
+            if (entity !== this._properties.subject) {
+                this._properties.setSubject(entity, buildNodeModel);
+            }
+        } else if (this._tab === 'textures') {
+            this._textureList.setRows(textureRows(device));
+            const texture = this._textureList.selected;
+            if (texture !== this._properties.subject) {
+                this._properties.setSubject(texture, this._textureModel, this._textureList.selectedKey);
+            }
+        } else if (this._tab === 'meshes') {
+            const survey = surveyMeshes(this._app);
+            Inspector._setNote(this._meshNote, meshNote(survey));
+            this._meshList.setRows(meshListRows(survey));
+            const mesh = this._meshList.selected;
+            if (mesh !== this._properties.subject) {
+                this._properties.setSubject(mesh, this._meshModel, this._meshList.selectedKey);
+            }
+        } else if (this._tab === 'materials') {
+            this._materialList.setRows(materialListRows(surveyMaterials(this._app)));
+            const material = this._materialList.selected;
+            if (material !== this._properties.subject) {
+                this._properties.setSubject(material, this._materialModel, this._materialList.selectedKey);
+            }
+        } else if (this._tab === 'cameras') {
+            const rows = cameraRows(this._app, this._fly?.camera ?? null);
+            this._cameraList.setRows(rows);
+            // the render mode can be switched for any one camera, or all of them. The options are
+            // rebuilt only when the cameras change: rebuilding them closes an open drop down
+            const scopes = [['all', 'all cameras'], ...rows.map(row => [row.key, row.name])];
+            const signature = scopes.map(([key, name]) => `${key}\0${name}`).join('\n');
+            if (signature !== this._scopeSignature) {
+                this._scopeSignature = signature;
+                this._fillSelect(this._renderScope, scopes);
+            }
+            const camera = this._cameraList.selected;
+            if (camera !== this._properties.subject) {
+                this._properties.setSubject(camera, this._cameraModel, this._cameraList.selectedKey);
+            }
+        } else if (this._tab === 'scripts') {
+            this._scriptList.setRows(scriptListRows(surveyScripts(this._app)));
+            const cls = this._scriptList.selected;
+            if (cls !== this._properties.subject) {
+                this._properties.setSubject(cls, this._scriptModel, this._scriptList.selectedKey);
+            }
+        } else if (this._tab === 'memory') {
+            this._bufferList.setRows(memoryRows(device, bufferOwners(this._app)));
+            const buffer = this._bufferList.selected;
+            if (buffer !== this._properties.subject) {
+                this._properties.setSubject(buffer, this._bufferModel, this._bufferList.selectedKey);
+            }
+        } else if (this._tab === 'assets') {
+            this._assetList.setRows(assetRows(this._app.assets, this._assetSort.value));
+            const asset = this._assetList.selected;
+            if (asset !== this._properties.subject) {
+                this._properties.setSubject(asset, this._assetModel, this._assetList.selectedKey);
+            }
+        } else if (this._tab === 'shaders') {
+            this._shaderList.setRows(shaderRows(device));
+            const shader = this._shaderList.selected;
+            if (shader !== this._properties.subject) {
+                this._properties.setSubject(shader, this._shaderModel, this._shaderList.selectedKey);
+            }
+        } else if (this._tab === 'perf') {
+            // the charts are the subject, so the view follows the frame they show
+            if (this._properties.subject !== this._perfCharts) {
+                this._properties.setSubject(this._perfCharts, this._perfModel, 'perf');
+            }
+            this._updatePerfBar();
+        } else {
+            if ((capture && !this._frozen) || !this._frame) {
+                this._frame = captureFrameGraph(this._app);
+            }
+            if (this._tab === 'passes') {
+                this._passList.setRows(passRows(this._frame, device));
+                const item = this._passList.selected;
+                if (item !== this._properties.subject) {
+                    this._properties.setSubject(item, this._passListModel(item), this._passList.selectedKey);
+                }
+            } else {
+                this._targetList.setRows(renderTargetRows(device, this._frame));
+                const rt = this._targetList.selected;
+                if (rt !== this._properties.subject) {
+                    this._properties.setSubject(rt, this._targetModel, this._targetList.selectedKey);
+                }
+            }
+        }
+
+        this._updateStatus();
+    }
+
+    /**
+     * @param {string} value - The filter text, applied to every list.
+     * @private
+     */
+    _applyFilter(value) {
+        this._hierarchy.filter = value;
+        this._hierarchy.filterBy = /** @type {any} */ (this._filterBy.value);
+        const names = value;
+        this._passList.filter = names;
+        this._targetList.filter = names;
+        this._textureList.filter = names;
+        this._shaderList.filter = names;
+        this._assetList.filter = names;
+        this._bufferList.filter = names;
+        this._meshList.filter = names;
+        this._materialList.filter = names;
+        this._scriptList.filter = names;
+        this._cameraList.filter = names;
+        this._bodyList.filter = names;
+        this._refreshLists(false);
+        // the instances listed under a forward pass narrow with the filter too
+        this._properties.refresh();
+    }
+
+    /**
+     * @returns {Record<string, ListView>} The list of each tab, all but the hierarchy, by tab.
+     * @private
+     */
+    _tabLists() {
+        return {
+            passes: this._passList,
+            targets: this._targetList,
+            textures: this._textureList,
+            shaders: this._shaderList,
+            meshes: this._meshList,
+            materials: this._materialList,
+            scripts: this._scriptList,
+            cameras: this._cameraList,
+            memory: this._bufferList,
+            assets: this._assetList,
+            physics: this._bodyList
+        };
+    }
+
+    /**
+     * @returns {ListView[]} The lists of the tabs, all but the hierarchy.
+     * @private
+     */
+    _lists() {
+        return Object.values(this._tabLists());
+    }
+
+    /**
+     * Opens the copy menu on what was right-clicked. Text fields keep the browser's own menu, to
+     * paste into them.
+     *
+     * @param {MouseEvent} e - The event.
+     * @private
+     */
+    _onContextMenu = (e) => {
+        if (isTextTarget(e)) return;
+        const copy = this._copyTargetAt(/** @type {Node} */ (e.composedPath()[0]), e);
+        if (!copy) return;
+        e.preventDefault();
+        this._menu?.show(e.clientX, e.clientY, copy.title, this._copyItems(copy));
+    };
+
+    /**
+     * What a right click copies: a row or section of the property view, or anywhere else in it
+     * the subject. A row of a list or of the hierarchy is selected first, the way a click selects
+     * it, and the subject it shows is copied; the header of a group copies the group, and a row
+     * that selects nothing its figures. A tab is opened first, the way a click opens it, and
+     * everything it lists is copied.
+     *
+     * @param {Node} target - What was right-clicked.
+     * @param {MouseEvent} [e] - The click, for where it was on the charts of the Performance tab.
+     * @returns {CopyTarget|null} What to copy, or null for a part of the panel nothing is copied
+     * from, such as the toolbar.
+     * @private
+     */
+    _copyTargetAt(target, e) {
+        const property = this._properties.copyTargetAt(target);
+        if (property) return property;
+
+        // the charts and the timeline of the Performance tab copy what is under the pointer
+        const perf = this._tab === 'perf' && e ? this._perfCharts.copyAt(target, e) : null;
+        if (perf) return this._perfCopy(perf);
+
+        const node = this._hierarchy.nodeAt(target);
+        if (node) {
+            this._hierarchy.select(node);
+            return this._properties.subjectCopyTarget();
+        }
+        for (const list of this._lists()) {
+            const row = list.rowAt(target);
+            if (!row) continue;
+            if (row.header) return { title: row.name, copy: options => copyGroup(list.rows, row.key, options) };
+            if (row.inert) return { title: row.name, copy: () => copyListRow(row) };
+            list.select(row.key);
+            return this._properties.subjectCopyTarget();
+        }
+
+        const tab = Object.keys(this._tabButtons).find(id => this._tabButtons[id].contains(target));
+        if (tab) {
+            this._setTab(/** @type {any} */ (tab));
+            return this._tabCopyTarget(tab);
+        }
+        return null;
+    }
+
+    /**
+     * @param {string} tab - A tab.
+     * @returns {CopyTarget|null} A copy of everything the tab lists: the hierarchy from its root,
+     * or every row of the tab's list, whatever its filter shows.
+     * @private
+     */
+    _tabCopyTarget(tab) {
+        const title = this._tabButtons[tab].textContent ?? tab;
+        if (tab === 'perf') return this._perf.count ? this._perfCopy({ kind: 'capture' }) : null;
+        if (tab === 'hierarchy') {
+            const root = this._app.root;
+            return { title, copy: options => copySubject(root, buildNodeModel(root), options) };
+        }
+        const list = this._tabLists()[tab];
+        return list ? { title, copy: options => copyList(title, list.rows, options) } : null;
+    }
+
+    /**
+     * @param {CopyTarget} copy - What the menu copies.
+     * @returns {MenuItem[]} The entries of the menu: on its own, a
+     * number of links deep, and every link there is.
+     * @private
+     */
+    _copyItems(copy) {
+        // figures have no links to follow, so they are copied as they are, or as CSV
+        if (copy.plain) {
+            /** @type {MenuItem[]} */
+            const items = [{ text: () => 'Copy as JSON', title: 'Copy it with numbers at full precision', run: () => this._copy(copy, 0) }];
+            const csv = copy.csv;
+            if (csv) {
+                items.push({ text: () => 'Copy as CSV', title: 'Copy it a row per frame, to paste into a spreadsheet', run: () => this._copyText(csv, 'CSV') });
+            }
+            return items;
+        }
+        const levels = n => `${n} level${n === 1 ? '' : 's'}`;
+        return [{
+            text: () => 'Copy as JSON',
+            title: 'Copy it on its own: what it links to is named, not copied',
+            run: () => this._copy(copy, 0)
+        }, {
+            text: () => `Copy ${levels(this._copyDepth)} deep`,
+            title: 'Copy it with what it links to, up to this many links away: children, mesh instances, materials, textures',
+            run: () => this._copy(copy, this._copyDepth),
+            buttons: [{
+                text: '−',
+                title: 'One level less',
+                disabled: () => this._copyDepth <= 1,
+                run: () => this._setCopyDepth(this._copyDepth - 1)
+            }, {
+                text: '+',
+                title: 'One level more',
+                disabled: () => this._copyDepth >= MAX_COPY_DEPTH,
+                run: () => this._setCopyDepth(this._copyDepth + 1)
+            }]
+        }, {
+            text: () => 'Copy all levels',
+            title: 'Copy it with everything it links to, however far, such as the whole hierarchy below a node',
+            run: () => this._copy(copy, Infinity)
+        }];
+    }
+
+    /**
+     * @param {number} depth - How many links the deep copy follows.
+     * @private
+     */
+    _setCopyDepth(depth) {
+        this._copyDepth = Math.max(1, Math.min(MAX_COPY_DEPTH, Math.round(depth)));
+        this._saveSettings();
+    }
+
+    /**
+     * Copies to the clipboard as JSON, and notes how much was copied.
+     *
+     * @param {CopyTarget} copy - What to copy.
+     * @param {number} depth - How many links to follow, see {@link CopyOptions#depth}.
+     * @private
+     */
+    _copy(copy, depth) {
+        const ctx = { ...this._context(), backlinks: false };
+        const opaque = this._opaqueObjects();
+        let result;
+        let text;
+        try {
+            result = copy.copy({
+                depth,
+                modelFor: obj => this._copyModel(obj, ctx),
+                opaque: obj => opaque.has(obj),
+                exclude: obj => obj === this._transformTool?.root
+            });
+            text = stringifyCopy(result.json);
+        } catch (e) {
+            this._menu?.note(`Could not copy: ${e?.message ?? e}`);
+            return;
+        }
+
+        const size = formatBytes(text.length);
+        const note = `Copied ${result.objects ? `${result.objects} object${result.objects === 1 ? '' : 's'}, ` : ''}${size}` +
+            `${result.truncated ? ', stopped at the object limit' : ''}`;
+        this._writeClipboard(text, note);
+    }
+
+    /**
+     * Copies text made on demand, such as CSV.
+     *
+     * @param {() => string} make - Makes the text.
+     * @param {string} what - What it is, for the note saying it was copied.
+     * @private
+     */
+    _copyText(make, what) {
+        let text;
+        try {
+            text = make();
+        } catch (e) {
+            this._menu?.note(`Could not copy: ${e?.message ?? e}`);
+            return;
+        }
+        this._writeClipboard(text, `Copied ${what}, ${formatBytes(text.length)}`);
+    }
+
+    /**
+     * @param {string} text - The text.
+     * @param {string} note - What the menu says once it is copied.
+     * @private
+     */
+    _writeClipboard(text, note) {
+        // the clipboard of the window the panel is in, which is the one with focus once popped out
+        const clipboard = (this._panel.ownerDocument.defaultView ?? window).navigator.clipboard;
+        if (!clipboard) {
+            this._menu?.note('The page has no access to the clipboard');
+            return;
+        }
+        clipboard.writeText(text).then(
+            () => this._menu?.note(note),
+            e => this._menu?.note(`Could not copy: ${e?.message ?? e}`)
+        );
+    }
+
+    /**
+     * What a right click on the Performance tab copies, as the charts tell it: the capture, a
+     * series, a frame, the frames selected together, or the timeline. A capture and a series
+     * cover the frames selected together, or every frame kept.
+     *
+     * @param {{ kind: string, key?: string, seq?: number }} what - What to copy.
+     * @returns {CopyTarget|null} The copy, or null for nothing.
+     * @private
+     */
+    _perfCopy(what) {
+        const capture = this._perf;
+        const charts = this._perfCharts;
+        const { from, to } = charts.copyRange;
+        const frames = charts.range ? `, ${capture.rangeLabel(from, to).toLowerCase()}` : '';
+        const figures = json => ({ json, objects: 0, truncated: false });
+        switch (what.kind) {
+            case 'capture':
+                return { title: `Performance${frames}`, plain: true, copy: () => figures(captureJson(capture, from, to, this._deviceInfo())) };
+            case 'series': {
+                const name = PERF_SERIES_NAMES[what.key] ?? what.key;
+                return {
+                    title: `${name}${frames}`,
+                    plain: true,
+                    copy: () => figures({ series: name, range: { from: capture.frameNumber(from), to: capture.frameNumber(to), frames: to - from + 1 }, rows: seriesRows(capture, what.key, from, to) }),
+                    csv: () => toCsv(seriesRows(capture, what.key, from, to))
+                };
+            }
+            case 'frame':
+                return { title: capture.label(what.seq), plain: true, copy: () => figures(frameJson(capture, what.seq)) };
+            case 'range':
+                return { title: capture.rangeLabel(from, to), plain: true, copy: () => figures(rangeJson(capture, from, to)) };
+            case 'timeline': {
+                const json = charts.timelineJson();
+                return json ? { title: `${json.title}, timeline`, plain: true, copy: () => figures(json) } : null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @returns {object} What a copy of a capture says about the device: its type and size.
+     * @private
+     */
+    _deviceInfo() {
+        const device = this._app.graphicsDevice;
+        return { type: device.deviceType, width: device.width, height: device.height, maxPixelRatio: device.maxPixelRatio };
+    }
+
+    /**
+     * @returns {Set<object>} The app's own objects, which a copy never follows, as through them it
+     * would reach everything else.
+     * @private
+     */
+    _opaqueObjects() {
+        const app = /** @type {any} */ (this._app);
+        const objects = new Set([app, app.scene?.layers]);
+        for (const value of Object.values(app)) {
+            if (value && typeof value === 'object') objects.add(value);
+        }
+        for (const system of app.systems?.list ?? []) objects.add(system);
+        for (const layer of app.scene?.layers?.layerList ?? []) objects.add(layer);
+        return objects;
+    }
+
+    /**
+     * The model a copy follows a link into: what the tab the link opens on shows, see
+     * {@link Inspector#_selectAny}, without the lists of what uses the object.
+     *
+     * @param {object} obj - An object reached through a link.
+     * @param {PassModelContext & { app: AppBase, backlinks: boolean }} ctx - What the model
+     * builders need besides their subject.
+     * @returns {PropertySection[]|PropertyRow[]|null} The model, or null for an object no tab shows.
+     * @private
+     */
+    _copyModel(obj, ctx) {
+        if (obj instanceof GraphNode) return buildNodeModel(obj);
+        if (obj instanceof Component) return buildComponentModel(obj);
+        if (obj instanceof MeshInstance) return meshInstanceRows(obj);
+        if (obj instanceof RenderTarget) return buildRenderTargetModel(obj, ctx);
+        if (obj instanceof FramePass) return buildPassModel(obj, ctx);
+        if (obj instanceof LayerStepSelection) return buildStepModel(obj, ctx);
+        if (obj instanceof Texture) return buildTextureModel(obj, ctx);
+        if (obj instanceof Shader) return buildShaderModel(obj);
+        if (obj instanceof Asset) return buildAssetModel(obj, ctx);
+        if (isScriptClass(obj)) return buildScriptModel(/** @type {Function} */ (obj), ctx);
+        if (obj instanceof Material) return buildMaterialModel(obj, ctx);
+        if (obj instanceof Mesh) return buildMeshModel(obj, ctx);
+        if (bufferKind(obj)) return buildBufferModel(obj, ctx);
+        return null;
+    }
+
+    /**
+     * Shows a GPU pass of the Performance tab on the Frame graph tab: the pass of the frame graph
+     * with its name it was matched to, in the frame graph as it is now, unless that is frozen.
+     *
+     * @param {{ name: string, occurrence: number }} pass - The pass, by its profiler name and which
+     * of the passes with that name it is.
+     * @private
+     */
+    _showPass({ name, occurrence }) {
+        if (!this._frozen) this._frame = captureFrameGraph(this._app);
+        this._setTab('passes');
+        const entries = this._frame?.entries.filter(entry => profilerName(entry.pass) === name) ?? [];
+        const entry = entries[occurrence] ?? entries[0];
+        if (entry) this._passList.selectItem(entry.pass);
+    }
+
+    /**
+     * Reveals a linked object in the tab that lists it: nodes in the hierarchy, passes in the frame
+     * graph, render targets in their list.
+     *
+     * @param {*} target - The object.
+     * @private
+     */
+    _selectAny(target) {
+        if (target instanceof GraphNode) {
+            this._setTab('hierarchy');
+            this._hierarchy.select(target);
+        } else if (target instanceof RenderTarget) {
+            this._setTab('targets');
+            this._targetList.selectItem(target);
+        } else if (target instanceof FramePass) {
+            this._setTab('passes');
+            this._passList.selectItem(target);
+        } else if (target instanceof Texture) {
+            this._setTab('textures');
+            this._textureList.selectItem(target);
+        } else if (target instanceof Shader) {
+            this._setTab('shaders');
+            this._shaderList.selectItem(target);
+        } else if (target instanceof Asset) {
+            this._setTab('assets');
+            this._assetList.selectItem(target);
+        } else if (isScriptClass(target)) {
+            this._setTab('scripts');
+            this._scriptList.selectItem(target);
+        } else if (target instanceof Material) {
+            this._setTab('materials');
+            this._materialList.selectItem(target);
+        } else if (target instanceof Mesh) {
+            this._setTab('meshes');
+            this._meshList.selectItem(target);
+        } else if (bufferKind(target)) {
+            this._setTab('memory');
+            this._bufferList.selectItem(target);
+        }
+    }
+
+    /**
+     * @returns {PassModelContext & { app: AppBase }} What the model builders need besides their
+     * subject: the app and device, the captured frame, and the paging state and filter of the
+     * instances listed under a forward pass.
+     * @private
+     */
+    _context() {
+        return {
+            app: this._app,
+            device: this._app.graphicsDevice,
+            frame: this._frame,
+            passKey: this._passList?.selectedKey ?? null,
+            pages: this._instancePages,
+            filter: this._filterInput?.value.trim().toLowerCase() ?? '',
+            stable: this._frozen || this._paused,
+            debug: this._debugFrame ? {
+                stepKey: this._debugFrame.stepKey,
+                index: this._debugFrame.index,
+                instance: this._debugFrame.instance,
+                choose: (stepKey, index, instance) => this._chooseDebugDraw(stepKey, index, instance)
+            } : null
+        };
+    }
+
+    /**
+     * @param {KeyboardEvent} e - The event.
+     * @private
+     */
+    _onKeyDown = (e) => {
+        if (this._onDebugKey(e)) return;
+        if (e.repeat) return;
+
+        // match on either the physical code ('Backquote') or the logical key ('`')
+        const matches = key => !!key && (e.code === key || e.key === key);
+
+        if (matches(this._toggleKey)) {
+            e.preventDefault();
+            this.visible = !this._visible;
+        } else if (matches(this._pauseKey)) {
+            e.preventDefault();
+            this.paused = !this._paused;
+        } else if (matches(this._stepKey)) {
+            e.preventDefault();
+            this.step();
+        }
+    };
+
+    /**
+     * @private
+     */
+    _onPopupHide = () => {
+        this._dockBack();
+    };
+
+    /**
+     * @private
+     */
+    _applyVisibility() {
+        if (!this._host) return;
+        if (!this._visible) this._menu?.hide();
+        this._host.style.display = this._visible ? '' : 'none';
+    }
+
+    /**
+     * @param {number} value - The panel width in CSS pixels, clamped to a usable range.
+     * @private
+     */
+    _setWidth(value) {
+        this._width = Math.max(240, Math.min(1600, value || 420));
+        this._applyLayout();
+        this._saveSettings();
+    }
+
+    /**
+     * @private
+     */
+    _applyLayout() {
+        if (!this._panel) return;
+        const popped = !!this._popup;
+        this._panel.classList.toggle('pci-popout', popped);
+        this._panel.classList.toggle('pci-dock-left', !popped && this._dock === 'left');
+        this._panel.style.width = popped ? '' : `${this._width}px`;
+        this._panel.style.top = popped ? '' : `${this._top}px`;
+        setIcon(this._popBtn, popped ? 'dock' : 'popout');
+        this._popBtn.setAttribute('aria-label', popped ? 'Dock' : 'Pop out');
+        this._popBtn.classList.remove('pci-warn');
+        setTip(this._popBtn, popped ? 'Bring the panel back into the page' : 'Move the panel to a window of its own');
+    }
+
+    /**
+     * @param {string} key - A `KeyboardEvent.code` or `key`.
+     * @returns {string} The key as shown on a button, or an empty string when unset.
+     * @private
+     */
+    static _keyLabel(key) {
+        if (!key) return '';
+        const labels = { Backquote: '`', Space: 'Space', Escape: 'Esc' };
+        return labels[key] ?? key.replace(/^Key|^Digit/, '');
+    }
+
+    /**
+     * @param {string} key - A `KeyboardEvent.code` or `key`.
+     * @returns {string} The key in brackets for a button label, or an empty string when unset.
+     * @private
+     */
+    static _keyHint(key) {
+        const label = Inspector._keyLabel(key);
+        return label ? ` (${label})` : '';
+    }
+
+    /**
+     * @private
+     */
+    _applyPauseState() {
+        if (!this._pauseBtn) return;
+        const paused = this._paused;
+        setIcon(this._pauseBtn, paused ? 'play' : 'pause');
+        this._pauseBtn.setAttribute('aria-label', paused ? 'Resume' : 'Pause');
+        setTip(this._pauseBtn, paused ?
+            `Resume the app${Inspector._keyHint(this._pauseKey)}` :
+            `Pause the app${Inspector._keyHint(this._pauseKey)}: rendering continues, time stands still`);
+        this._pauseBtn.classList.toggle('pci-active', paused);
+        setTip(this._stepBtn, `Advance one frame while paused${Inspector._keyHint(this._stepKey)}`);
+        this._stepBtn.disabled = !paused;
+        this._pausedEl.textContent = paused ? 'PAUSED' : '';
+    }
+
+    /**
+     * @private
+     */
+    _updateStatus() {
+        if (!this._countsEl) return;
+        const device = this._app.graphicsDevice;
+        let counts = '';
+        let selected = '';
+
+        switch (this._tab) {
+            case 'passes': {
+                const gpu = this._frame?.frameTime;
+                // WebGL times the frame with a single query; only WebGPU timestamps each pass
+                const perPass = device.isWebGPU ? '' : ' (per-pass times need WebGPU)';
+                counts = `${this._frame?.entries.length ?? 0} passes` +
+                    `${gpu !== undefined ? ` · GPU ${gpu.toFixed(2)} ms${perPass}` : ''}${this._frozen ? ' · frozen' : ''}`;
+                const item = this._passList.selected;
+                selected = item instanceof LayerStepSelection ?
+                    `${passDisplayName(item.pass)} › ${item.step.layer.name} ${item.step.transparent ? 'transparent' : 'opaque'}` :
+                    item ? passDisplayName(item) : '';
+                break;
+            }
+            case 'perf': {
+                const capture = this._perf;
+                const charts = this._perfCharts;
+                counts = `${capture.recording ? 'Recording' : 'Stopped'} · ${capture.count} frames`;
+                if (capture.count) {
+                    const { median } = captureNorms(capture);
+                    let hitches = 0;
+                    for (let seq = capture.first; seq < capture.end; seq++) {
+                        if (isHitch(capture, seq, median)) hitches++;
+                    }
+                    counts += ` · median ${formatMs(median)} · ${hitches} hitch${hitches === 1 ? '' : 'es'}`;
+                    selected = charts.range ? capture.rangeLabel(charts.range.from, charts.range.to) :
+                        `${capture.label(charts.shown)}${charts.following ? ', the newest' : ''}`;
+                }
+                break;
+            }
+            case 'targets': {
+                counts = `${this._targetList.rowCount} render targets · ${this._frame?.usage.size ?? 0} used this frame`;
+                const rt = this._targetList.selected;
+                selected = rt ? (rt === device.backBuffer ? 'Backbuffer' : rt.name) : '';
+                break;
+            }
+            case 'textures': {
+                const textures = collectTextures(device);
+                const bytes = textures.reduce((sum, texture) => sum + texture.gpuSize, 0);
+                counts = `${textures.length} textures · ${formatBytes(bytes)}`;
+                selected = this._textureList.selected?.name ?? '';
+                break;
+            }
+            case 'meshes': {
+                const survey = surveyMeshes(this._app);
+                const bytes = [...survey.users.keys()].reduce((sum, mesh) => sum + meshBytes(mesh), 0);
+                counts = `${survey.users.size} meshes · ${formatBytes(bytes)} · ${survey.instances} mesh instances`;
+                const mesh = this._meshList.selected;
+                selected = mesh ? `Mesh #${mesh.id}` : '';
+                break;
+            }
+            case 'materials': {
+                const materials = [...surveyMaterials(this._app).keys()];
+                const used = materials.filter(material => material.meshInstances.size > 0).length;
+                counts = `${materials.length} materials · ${used} in use`;
+                const material = this._materialList.selected;
+                selected = material ? `${material.name || 'Material'} #${material.id}` : '';
+                break;
+            }
+            case 'cameras': {
+                const cameras = collectCameras(this._app);
+                const screen = cameras.filter(isScreenCamera).length;
+                counts = `${cameras.length} cameras · ${screen} drawing to the screen`;
+                selected = this._cameraList.selected?.entity.name ?? '';
+                break;
+            }
+            case 'scripts': {
+                const survey = surveyScripts(this._app);
+                const instances = [...survey.values()].reduce((sum, script) => sum + script.instances.length, 0);
+                counts = `${survey.size} scripts · ${instances} instances`;
+                selected = survey.get(this._scriptList.selected)?.name ?? '';
+                break;
+            }
+            case 'memory': {
+                counts = `${formatBytes(videoMemory(device))} of video memory`;
+                // a buffer whose owner was not found is dimmed, and its name says only that
+                const row = this._bufferList.selectedRow;
+                selected = row ? `${KIND_NAMES[bufferKind(row.item)]}${row.dim ? '' : ` of ${row.name}`}` : '';
+                break;
+            }
+            case 'assets': {
+                const assets = collectAssets(this._app.assets);
+                const loaded = assets.filter(asset => asset.loaded).length;
+                const bytes = assets.reduce((sum, asset) => sum + (asset.file?.size ?? 0), 0);
+                counts = `${assets.length} assets · ${loaded} loaded${bytes ? ` · ${formatBytes(bytes)}` : ''}`;
+                selected = this._assetList.selected?.name ?? '';
+                break;
+            }
+            case 'shaders': {
+                const shaders = collectShaders(device);
+                const failed = shaders.filter(shader => shader.failed).length;
+                const compiling = shaders.filter(shader => !shader.ready && !shader.failed).length;
+                counts = `${shaders.length} shaders${compiling ? ` · ${compiling} compiling` : ''}${failed ? ` · ${failed} failed` : ''}`;
+                const shader = this._shaderList.selected;
+                selected = shader ? `${shader.name} (${stateName(shader)})` : '';
+                break;
+            }
+            case 'physics': {
+                const stats = physicsStats(this._app);
+                const physics = this._physics;
+                counts = `${stats.bodies} bodies · ${stats.active} awake · ${stats.contacts} contacts` +
+                    `${stats.joints ? ` · ${stats.joints} joints` : ''}` +
+                    ` · step ${stats.time.toFixed(2)} ms${physics?.enabled ? ` · ${physics.lineCount} lines` : ''}` +
+                    `${physics?.culledCount ? ` (${physics.culledCount} out of range)` : ''}`;
+                selected = this._bodyList.selected?.name ?? '';
+                break;
+            }
+            default: {
+                const { nodeCount, entityCount } = this._hierarchy;
+                counts = `${entityCount} entities · ${nodeCount - entityCount} graph nodes`;
+                selected = this._selected?.path ?? '';
+            }
+        }
+
+        this._countsEl.textContent = counts;
+        this._pathEl.textContent = selected;
+        setTip(this._pathEl, selected);
+    }
+
+    /**
+     * Picking: hovering the view outlines the entity under the pointer, and a click selects it in
+     * the hierarchy. The pointer is taken from the app while it is on.
+     *
+     * @param {boolean} on - Whether to pick.
+     * @private
+     */
+    _setPicking(on) {
+        if (on === (this._canvasMode === 'pick') || (on && this._transformTool)) return;
+        this._releaseCanvas();
+        if (on) {
+            this._stopFly();
+            this._picker ??= new ViewportPicker(this._app);
+            this._takeCanvas('pick', this._onPickEvent);
+        }
+        this._pickBtn.classList.toggle('pci-active', on);
+    }
+
+    /**
+     * @param {Event} e - A pointer event on the canvas, while picking.
+     * @private
+     */
+    _onPickEvent = (e) => {
+        const pointer = /** @type {PointerEvent} */ (e);
+        if (e.type === 'pointermove') {
+            // a moving pointer picks where it is now, not everywhere it has been
+            const busy = !!this._hoverPoint;
+            this._hoverPoint = [pointer.clientX, pointer.clientY];
+            if (!busy) this._pickHover();
+        } else if (e.type === 'pointerup') {
+            this._picker.pick(pointer.clientX, pointer.clientY).then((hit) => {
+                if (hit && this._canvasMode === 'pick') this._selectAny(hit.entity);
+            });
+        }
+    };
+
+    /**
+     * Picks under the latest pointer position until the pointer rests, outlining what it finds.
+     *
+     * @private
+     */
+    _pickHover() {
+        const [x, y] = this._hoverPoint;
+        this._picker.pick(x, y).then((hit) => {
+            const latest = this._hoverPoint;
+            if (this._canvasMode !== 'pick' || !latest) {
+                this._hoverPoint = null;
+                return;
+            }
+            this._hovered = hit?.entity ?? null;
+            // pick again only if the pointer moved while this one was reading back
+            if (latest[0] !== x || latest[1] !== y) {
+                this._pickHover();
+            } else {
+                this._hoverPoint = null;
+            }
+        });
+    }
+
+    /**
+     * Starts Fly or Orbit from its button, or stops it when it is on.
+     *
+     * @param {'fly'|'orbit'} kind - Which.
+     * @private
+     */
+    _toggleDrive(kind) {
+        const on = this._canvasMode === 'choose' ? this._chooseKind === kind : this._driveKind() === kind;
+        this._stopFly();
+        if (!on) this._startDrive(kind, null);
+    }
+
+    /**
+     * @returns {'fly'|'orbit'|null} Which of Fly and Orbit drives the camera, if either does.
+     * @private
+     */
+    _driveKind() {
+        if (this._fly instanceof CameraOrbit) return 'orbit';
+        return this._fly ? 'fly' : null;
+    }
+
+    /**
+     * Flies a camera, or with no camera given, the one camera drawing to the screen, or the one
+     * clicked next when several do.
+     *
+     * @param {CameraComponent|null} camera - The camera to fly, or null to find it from the view.
+     * @private
+     */
+    _startFly(camera) {
+        this._startDrive('fly', camera);
+    }
+
+    /**
+     * Flies a camera, or orbits it around the selected node. With no camera given, drives the one
+     * camera drawing to the screen, or the one clicked next when several do.
+     *
+     * @param {'fly'|'orbit'} kind - Whether to fly or to orbit.
+     * @param {CameraComponent|null} camera - The camera to drive, or null to find it from the view.
+     * @private
+     */
+    _startDrive(kind, camera) {
+        if (this._transformTool) return;
+        this._stopFly();
+        this._setPicking(false);
+        const target = this._selected;
+        if (kind === 'orbit' && !target) return;
+        const button = kind === 'orbit' ? this._orbitBtn : this._flyBtn;
+        if (!camera) {
+            const screen = collectCameras(this._app).filter(isScreenCamera);
+            if (screen.length > 1) {
+                this._chooseKind = kind;
+                this._takeCanvas('choose', (e) => {
+                    if (e.type !== 'pointerup') return;
+                    const pointer = /** @type {PointerEvent} */ (e);
+                    const bounds = /** @type {HTMLCanvasElement} */ (this._app.graphicsDevice.canvas).getBoundingClientRect();
+                    const chosen = screenCameraAt(this._app, (pointer.clientX - bounds.left) / bounds.width, (pointer.clientY - bounds.top) / bounds.height);
+                    if (chosen) this._startDrive(kind, chosen);
+                });
+                button.classList.add('pci-active');
+                return;
+            }
+            camera = screen[0] ?? null;
+            if (!camera) {
+                this._modeEl.textContent = kind === 'orbit' ?
+                    'ORBIT · no camera draws to the screen' :
+                    'FLY · no camera draws to the screen, fly one from the Cameras tab';
+                return;
+            }
+        }
+        this._fly = kind === 'orbit' ?
+            new CameraOrbit(this._app, camera, target, () => this._stopFly()) :
+            new CameraFly(this._app, camera, () => this._stopFly());
+        button.classList.add('pci-active');
+        this._properties.refresh();
+    }
+
+    /** @private */
+    _stopFly() {
+        if (this._canvasMode === 'choose') this._releaseCanvas();
+        if (this._fly) {
+            this._fly.destroy();
+            this._fly = null;
+            this._properties.refresh();
+        }
+        this._flyBtn?.classList.remove('pci-active');
+        this._orbitBtn?.classList.remove('pci-active');
+        this._applyViewToolState();
+    }
+
+    /**
+     * Pick, Fly and Orbit take the view from the app, which a gizmo needs to be used in, so their
+     * buttons are off while one is on. Orbit also needs a node to orbit around, so its button is off
+     * until one is selected.
+     *
+     * @private
+     */
+    _applyViewToolState() {
+        if (!this._orbitBtn) return;
+        const gizmo = !!this._transformTool;
+        this._pickBtn.disabled = gizmo;
+        this._flyBtn.disabled = gizmo;
+        this._orbitBtn.disabled = gizmo || (!this._selected && !(this._fly instanceof CameraOrbit));
+    }
+
+    /**
+     * Takes the pointer on the canvas for a mode, and Esc to end it.
+     *
+     * @param {'pick'|'choose'} mode - The mode.
+     * @param {(e: Event) => void} onEvent - Called with the pointer events.
+     * @private
+     */
+    _takeCanvas(mode, onEvent) {
+        this._canvasCapture = new CanvasCapture(/** @type {HTMLCanvasElement} */ (this._app.graphicsDevice.canvas), onEvent);
+        this._canvasMode = mode;
+        window.addEventListener('keydown', this._onModeKey, true);
+    }
+
+    /** @private */
+    _releaseCanvas() {
+        this._canvasCapture?.destroy();
+        this._canvasCapture = null;
+        if (this._canvasMode === 'choose') {
+            this._flyBtn.classList.remove('pci-active');
+            this._orbitBtn.classList.remove('pci-active');
+        }
+        this._canvasMode = null;
+        this._hovered = null;
+        this._hoverPoint = null;
+        window.removeEventListener('keydown', this._onModeKey, true);
+    }
+
+    /**
+     * @param {KeyboardEvent} e - A key pressed while the canvas is taken.
+     * @private
+     */
+    _onModeKey = (e) => {
+        if (e.key !== 'Escape') return;
+        e.stopImmediatePropagation();
+        if (this._canvasMode === 'pick') this._setPicking(false);
+        else this._stopFly();
+    };
+
+    /**
+     * Ends every mode that changes the view: picking, flying, the render modes and wireframe.
+     *
+     * @private
+     */
+    _endViewportModes() {
+        if (!this._pickBtn) return;
+        this._setPicking(false);
+        this._stopFly();
+        this._setTransformMode(null);
+        this._resetRenderOverrides();
+        this._modeEl.textContent = '';
+    }
+
+    /**
+     * Puts back the shader pass each camera had before the panel changed it, and turns wireframe
+     * off.
+     *
+     * @private
+     */
+    _resetRenderOverrides() {
+        for (const [camera, name] of this._changedPasses) camera.setShaderPass(name);
+        this._changedPasses.clear();
+        this._renderMode.value = RENDER_MODES[0][0];
+        this._wireframe.restore();
+        this._wireframeToggle.checked = false;
+        this._updateResetButton();
+        this._refreshLists(false);
+        this._properties.refresh();
+    }
+
+    /**
+     * Enables the reset button while a camera renders with a changed mode or wireframe is on.
+     *
+     * @private
+     */
+    _updateResetButton() {
+        const changed = this._wireframeToggle.checked ||
+            [...this._changedPasses].some(([camera, name]) => (camera.camera.shaderPassInfo?.name ?? null) !== name);
+        this._resetViewBtn.disabled = !changed;
+    }
+
+    /**
+     * Applies the render mode chosen on the Cameras tab to the selected camera, or to every camera,
+     * keeping the shader pass each had to put back when the panel closes.
+     *
+     * @private
+     */
+    _applyRenderMode() {
+        const name = this._renderMode.value;
+        const chosen = this._scopeCamera();
+        const cameras = chosen ? [chosen] : collectCameras(this._app);
+        for (const camera of cameras) {
+            if (!this._changedPasses.has(camera)) this._changedPasses.set(camera, camera.camera.shaderPassInfo?.name ?? null);
+            const original = this._changedPasses.get(camera);
+            // back to standard gives a camera the pass it had before, which the app may have chosen
+            camera.setShaderPass(name === RENDER_MODES[0][0] ? original : name);
+        }
+        this._updateResetButton();
+        this._refreshLists(false);
+        this._properties.refresh();
+    }
+
+    /**
+     * @returns {CameraComponent|null} The camera the render mode is switched for, or null when it is
+     * switched for all of them.
+     * @private
+     */
+    _scopeCamera() {
+        const key = this._renderScope.value;
+        if (key === 'all') return null;
+        return cameraRows(this._app, null).find(row => row.key === key)?.item ?? null;
+    }
+
+    /** @private */
+    _applyWireframe() {
+        if (this._wireframeToggle.checked) this._wireframe.apply(this._app);
+        else this._wireframe.restore();
+        this._updateResetButton();
+    }
+
+    /**
+     * Says in the status bar what the view is doing while it is picked or flown.
+     *
+     * @private
+     */
+    _updateModeStatus() {
+        let text = '';
+        if (this._canvasMode === 'pick') {
+            text = `PICK · ${this._hovered ? `"${this._hovered.name}", click to select` : 'hover an entity, click to select'} · Esc stops`;
+        } else if (this._canvasMode === 'choose') {
+            text = `${this._chooseKind.toUpperCase()} · click the view of the camera to ${this._chooseKind} · Esc stops`;
+        } else if (this._fly instanceof CameraOrbit) {
+            text = `ORBIT · "${this._fly.camera.entity.name}" around "${this._fly.target.name}" · drag to orbit, right-drag or Shift-drag to pan, wheel to zoom · Esc stops`;
+        } else if (this._fly) {
+            const keys = this._fly.zooms ? 'W S zoom, A D Q E pan' : 'WASD QE move';
+            text = `FLY · "${this._fly.camera.entity.name}" · ${keys}, drag to look, wheel speed ${this._fly.speed.toFixed(1)}, Shift faster · Esc stops`;
+        } else if (this._transformTool) {
+            const selected = this._selected;
+            text = `${this._transformTool.mode.toUpperCase()} · ${selected ? `drag the gizmo on "${selected.name}"` : 'select an entity'} · Esc stops`;
+        }
+        if (this._modeEl.textContent !== text && (text || !this._modeEl.textContent.includes(' · no camera'))) this._modeEl.textContent = text;
+    }
+
+    /**
+     * Turns a gizmo on, in place of the one that is on, or turns it off. The gizmo is drawn and
+     * used in the view of the first camera drawing to the screen, which Pick, Fly and Orbit would
+     * take from the app, so they stop and stay off while it is on.
+     *
+     * @param {TransformMode|null} mode - What the gizmo does, or null to turn it off.
+     * @private
+     */
+    _setTransformMode(mode) {
+        window.removeEventListener('keydown', this._onTransformKey, true);
+        this._transformTool?.destroy();
+        this._transformTool = null;
+        if (mode) {
+            this._setPicking(false);
+            this._stopFly();
+            const camera = collectCameras(this._app).find(isScreenCamera) ?? null;
+            if (camera) {
+                this._transformTool = new TransformTool(this._app, mode, camera);
+                this._transformTool.attach(this._selected);
+                // Esc turns it off, as it ends Pick, Fly and Orbit
+                window.addEventListener('keydown', this._onTransformKey, true);
+            } else {
+                this._modeEl.textContent = `${mode.toUpperCase()} · no camera draws to the screen`;
+            }
+        }
+        for (const [id, button] of Object.entries(this._transformBtns ?? {})) {
+            button.classList.toggle('pci-active', this._transformTool?.mode === id);
+        }
+        this._applyViewToolState();
+        this._hierarchy?.refresh();
+        // the Cameras tab offers to fly only while no gizmo is on
+        this._properties?.refresh();
+    }
+
+    /**
+     * @param {KeyboardEvent} e - A key pressed while a gizmo is on.
+     * @private
+     */
+    _onTransformKey = (e) => {
+        // Escape in a text field, such as a value being edited, is the field's own
+        if (e.key !== 'Escape' || isTextTarget(e)) return;
+        e.stopImmediatePropagation();
+        this._setTransformMode(null);
+    };
+
+    /**
+     * Hands the pointer to the gizmo first, and keeps from everything else what it keeps.
+     *
+     * @param {Event} e - A pointer event anywhere in the window.
+     * @private
+     */
+    _onTransformPointer = (e) => {
+        if (!this._transformTool?.handle(e)) return;
+        e.stopImmediatePropagation();
+        if (e.cancelable) e.preventDefault();
+    };
+
+    /**
+     * Outlines a node in the viewport for the current frame.
+     *
+     * @param {GraphNode} node - The node.
+     * @param {Color} [color] - The color to outline it in. Defaults to the highlight color.
+     * @private
+     */
+    _drawHighlight(node, color = this._highlightColor) {
+        const wire = this._wire;
+        wire.color.copy(color);
+        wire.depthTest = false;
+
+        let drawn = false;
+
+        if (node instanceof Entity) {
+            const meshInstances = node.render?.meshInstances ?? node.model?.meshInstances;
+            if (meshInstances) {
+                for (const meshInstance of meshInstances) {
+                    if (meshInstance.visible) {
+                        wire.box(meshInstance.aabb);
+                        drawn = true;
+                    }
+                }
+            }
+
+            const splatAabb = node.gsplat?.customAabb;
+            if (splatAabb) {
+                wire.box(splatAabb);
+                drawn = true;
+            }
+
+            if (node.camera) {
+                wire.frustum(node.camera);
+                drawn = true;
+            }
+
+            if (node.light) {
+                wire.light(node.light, this._highlightSize(node));
+                drawn = true;
+            }
+
+            const corners = node.element?.worldCorners;
+            if (corners) {
+                wire.loop(corners);
+                drawn = true;
+            }
+        }
+
+        if (!drawn) {
+            wire.axes(node.getWorldTransform(), this._highlightSize(node));
+        }
+    }
+
+    /**
+     * {@link lockedNode} and its ancestors cannot be disabled from the panel, as that would switch
+     * the panel off with them.
+     *
+     * @param {GraphNode} node - The node.
+     * @returns {boolean} Whether the node's enabled checkbox is withheld.
+     * @private
+     */
+    _isLocked(node) {
+        for (let current = this._lockedNode; current; current = current.parent) {
+            if (current === node) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @param {GraphNode} node - The node.
+     * @returns {number} A size that reads well from the closest camera.
+     * @private
+     */
+    _highlightSize(node) {
+        const cameras = this._app.systems.camera?.cameras;
+        let distance = 10;
+        if (cameras?.length) {
+            distance = Infinity;
+            for (const camera of cameras) {
+                distance = Math.min(distance, camera.entity.getPosition().distance(node.getPosition()));
+            }
+        }
+        return Math.max(0.05, distance * 0.06);
+    }
+}
+
+export { Inspector };

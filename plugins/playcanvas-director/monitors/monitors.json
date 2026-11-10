@@ -1,0 +1,14 @@
+[
+    {
+        "name": "director-comments",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/watch-comments.ts\"",
+        "description": "stage comments sent to the agent",
+        "when": "on-skill-invoke:director-design"
+    },
+    {
+        "name": "director-comments-plugin",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/watch-comments.ts\"",
+        "description": "stage comments sent to the agent",
+        "when": "on-skill-invoke:playcanvas-director:director-design"
+    }
+]
