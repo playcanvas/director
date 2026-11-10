@@ -1374,7 +1374,9 @@ export const mountTools = async (entry) => {
 
         for (const [name, g] of Object.entries(gizmos)) {
             g.coordSpace = space;
-            g.snapIncrement = SNAP[name];
+
+            // engine 2.24 snaps rotation by snapAngleIncrement, deprecating the rotate gizmo's snapIncrement
+            g[name === 'rotate' && 'snapAngleIncrement' in g ? 'snapAngleIncrement' : 'snapIncrement'] = SNAP[name];
             g.enabled = false;
             g.on('pointer:down', (_x, _y, mi) => {
                 if (name !== tool) {
@@ -2305,7 +2307,8 @@ export const mountTools = async (entry) => {
 
         // the inspector panel: a read-only view of the app beside our toolbar, on the engines it supports. the toolbar
         // holds every viewport control, so the panel's pause, step, pick, fly, orbit and gizmos are hidden (our picker also
-        // finds world points and areas); the selection is shared, and shown once, as our outline while paused
+        // finds world points and areas), as is its MCP switch, whose tools would pause and step the app past our toolbar;
+        // the selection is shared, and shown once, as our outline while paused
         // its toggle is the viewer's, beside the comments panel's: we say whether it can open and whether it is open
         let canInspect = false;
         let inspecting = false;
@@ -2359,6 +2362,7 @@ export const mountTools = async (entry) => {
                 inspector._pickBtn,
                 inspector._flyBtn,
                 inspector._orbitBtn,
+                inspector._mcpBtn,
                 ...Object.values(inspector._transformBtns ?? {})
             ]) {
                 b?.style.setProperty('display', 'none');
